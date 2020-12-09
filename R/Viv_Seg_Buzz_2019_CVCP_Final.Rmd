@@ -2448,9 +2448,9 @@ prop.table(table(seg_interval$lengths[seg_interval$values == 0]/4 < 5))
 
 # save data
 ```{r}
-save(Final, Bats, Viv2015_audio, V, Vint, va.traj, m2_15, m3_15, threshold, HMM_data, TNR_buzz, TNR_buzz, TNR_buzz_mlt, TPR_buzz, TPR_buzz_mlt, BACC_buzz, BACC_buzz_mlt, TPR_TNR_plot, sum_BACC, fspeed, fturn, cspeed, cturn, file = "../data/VSeg_Buzz_18.robj")
+save(Final, Bats, Viv2015_audio, V, Vint, va.traj, m2_15, m3_15, m4_15, threshold, HMM_data, TNR_buzz, TNR_buzz, TNR_buzz_mlt, TPR_buzz, TPR_buzz_mlt, BACC_buzz, BACC_buzz_mlt, TPR_TNR_plot, sum_BACC, fspeed, fturn, cspeed, cturn, file = "../data/VSeg_Buzz_18.robj")
 
-load("VSeg_Buzz_18.robj")
+load("../data/VSeg_Buzz_18.robj")
 ```
 
 
