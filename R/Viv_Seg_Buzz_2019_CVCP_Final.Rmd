@@ -1,0 +1,2861 @@
+---
+title: "Viv_Seg_Buzz_2018"
+author: "Edward"
+date: "July 16, 2018"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+# load libraries and data
+```{r}
+setwd("/Users/edwar/Dropbox/Vivesi2017/Analysis/Segmentation/Viv_Segmentation/")
+libs <- c("momentuHMM", "lubridate", "data.table", "zoo", "move", "dplyr", "adehabitatLT", "smoove", "doParallel", "foreach", "maptools", "sp", "caret", "robustbase", "here", "plyr", "gbm", "MASS", "mixtools", "knitr","mapdata", "ggplot2", "scales", "gplots", "ggsignif", "ggpubr", "ggsci")
+lapply(libs, suppressPackageStartupMessages(require), character.only = TRUE)
+
+source("functions.r")
+source("pairsPlus.r")
+source("gbmplot2.r")
+
+scantrack <- function(track, ...){
+  layout(rbind(c(1,2), c(1,3)))
+  with(track, plot(x,y,type = "o", main = Individual[1], col = date(time)))
+  lines(Islands)
+  lines(Coast)
+  with(track, plot(time,x))
+  with(track, plot(time,y))
+  layout(1)
+}
+
+
+load("/Users/edwar/Dropbox/Vivesi2017/Analysis/Segmentation/Viv_Segmentation/lands.robj")
+
+Viv2015_audio <- read.csv("C:/Users/edwar/Dropbox/Vivesi2015/vivesi_tracks/Movebank/Audio/viv2015audio_tracks.csv")
+Viv2015_audio <- Viv2015_audio[2:nrow(Viv2015_audio),]
+
+# scantrack(Viv2015_audio)
+
+which(duplicated(Viv2015_audio))
+which(is.na(Viv2015_audio$lat))
+
+Viv2015_audio$time <- as.POSIXct(Viv2015_audio$time)
+table(Viv2015_audio$buzz)
+```
+
+# clean data and get basic movement parameters
+## remove points from within 100m of the origin of each track  
+```{r}
+library(sp)
+library(raster)
+library(sf)
+
+r <- raster(ncols=1000, nrows=1000, ext = extent(Islands))
+
+extent(Islands)
+extent(Land)
+plot(Land)
+lines(Islands)
+
+r <- rasterize(Islands, r, fun = "last")
+r@data@values[which(!is.na(r@data@values))] <- 1
+
+e <- extent(c(297000, 302000, 3195000, 3199000))
+
+p <- as(e, 'SpatialPolygons') 
+
+# extent(p) <- extent(r)
+r_crop <- mask(x = r, mask = p, inverse = FALSE)
+
+plot(r_crop)
+points(Viv2015_audio$x, Viv2015_audio$y)
+
+dist2land <- raster::distance(r_crop)
+plot(dist2land)
+lines(Islands)
+points(Viv2015_audio$x, Viv2015_audio$y)
+
+sp_points <- coordinates(data.frame(x = Viv2015_audio$x, y = Viv2015_audio$y))
+Viv2015_audio$dist_origin <- raster::extract(x = dist2land, y = sp_points)
+
+
+plot(dist2land, xlim = c(297000, 303000), ylim = c(3195000, 3199000))
+lines(Islands)
+with(Viv2015_audio[Viv2015_audio$dist_origin > 250,], points(x, y))
+
+```
+
+## Bat flights, more than 100 locations
+```{r}
+bats <- unique(Viv2015_audio$Individual)
+
+VA <- {}
+i = 1
+for(i in 1:length(bats)){
+  bat <- Viv2015_audio[Viv2015_audio$Individual == bats[i],]
+  bat <- bat[order(bat$time),]
+  # scantrack(bat)
+  
+  dates <- unique(date(bat$time))
+  j = 2
+  for(j in 1:length(dates)){
+    bat_date <- bat[date(bat$time) == dates[j],]
+    bat_date$bat_date <- paste0(bat_date$Individual, "_", dates[j])
+    
+    bat_date <- bat_date[which(bat_date$dist_origin > 300),]
+    
+    bat_date$dt <- c(NA, diff(bat_date$time))
+    # scantrack(bat_date)
+    idx <- which(bat_date$dt > 500)
+    
+    if(length(idx) > 0){
+      idx <- c(1, idx + 1, nrow(bat_date))
+    }
+    if(length(idx)==0){idx <- c(1, nrow(bat_date))}
+    if(which.max(idx) != length(idx)){idx <- idx[-which.max(idx)]}
+      
+      ii = 2
+      for(ii in 2:length(idx)){
+        bat_flight <- bat_date[idx[ii-1]:(idx[ii]-1),]
+        
+        bat_flight$dt <- c(NA, diff(bat_flight$time))
+        
+        bat_flight$bat_flight <- paste0(bat_flight$Individual, "_", dates[j], "_", ii-1)
+        
+        if(max(bat_flight$dt, na.rm = TRUE) > 1000){
+          bat_flight <- bat_flight[which(bat_flight$dt < 1000),]
+        }
+        
+        if(nrow(bat_flight) > 100){
+          
+          with(bat_flight, plot(x,y, type = "o", main = bats[i],
+                                xlim = c(297000, 302000), 
+                                ylim = c(3195000, 3199000)))
+          lines(Islands)
+          
+          scantrack(bat_flight)
+          VA <- rbind(VA, bat_flight)     
+        }
+         
+      }
+    }
+}
+
+# VA$bat_flight <- factor(VA$bat_flight)
+v <- VA
+
+unique(v$bat_flight)
+```
+
+```{r}
+bat_flights <- unique(v$bat_flight)
+
+for(i in 1:length(bat_flights)){
+  bat_flight <- v[v$bat_flight == bat_flights[i],]
+  
+  if(nrow(bat_flight) > 0){
+    layout(cbind(1,2))
+    with(bat_flight, plot(x, y, asp = 1, main = bat_flight[1]))
+    lines(Islands)
+    lines(Coast)
+    plot(bat_flight$time, type = "o")
+  }
+}
+```  
+  
+# Create traj  
+```{r}
+v$X <- v$x
+v$Y <- v$y
+
+va.traj <- as.ltraj(data.frame(X = v$x, Y = v$y), date = v$time, id = factor(v$bat_flight), burst = v$bat_flight)
+temp <- ld(va.traj)
+temp$bat_flight <- temp$burst
+temp$time <- temp$date
+V <- full_join(v, temp, by = c("bat_flight", "time", "x", "y"))
+V <- V[order(V$bat_flight, V$time),]
+
+V$buzz01[V$buzz == 0] <- 0
+V$buzz01[V$buzz > 0] <- 1
+```
+
+# interpolate points to ensure consistent sampling rate
+```{r}
+Vint <- {} # Vivesi interpolated
+DT <- 15
+bats <- unique(V$bat_flight)
+i= 1
+for(i in 1:length(bats)){
+  bat <- v[v$bat_flight == bats[i],]
+  dt <- dtime(bat$time, units = "secs")
+  dts <- unique(dt)
+  if(length(dts)>1){
+    # fix points that have stutter
+    if(14 %in% dts){
+      times <- seq(min(bat$time), max(bat$time)+dseconds(DT), dseconds(DT))
+      for(j in 1:nrow(bat)){
+        idx <- which.min(abs(times - bat$time[j]))
+        bat$time[j] <- times[idx]
+      }
+    }
+    dt <- dtime(bat$time, units = "secs")
+    traj <- as.ltraj(data.frame(X = bat$x, Y = bat$y), date = bat$time, id = factor(bat$bat_flight), burst = factor(bat$bat_flight))
+    temp <- ld(redisltraj(traj, DT, type ="time"))
+    temp$bat_flight <- temp$burst
+    temp$time <- temp$date
+    for(j in 1:nrow(temp)){
+      idx <- which.min(abs(temp$time[j] - bat$time))
+      temp$bat_flight[j] <- bat$bat_flight[idx]
+      temp$bat_date[j] <- bat$bat_date[idx]
+      temp$flight[j] <- bat$flight[idx]
+      temp$Individual[j] <- bat$Individual[idx]
+      temp$buzz[j] <- bat$buzz[idx]
+    }
+
+    vint <- temp
+    vint <- full_join(bat[,-c(20,22, 24, 25)], temp, by = c("bat_flight", "time", "x", "y"))
+    # drop bat_date, Individual, buzz
+    names(vint)
+    vint <- vint[order(vint$time),]
+    v_names<- c("X","timeStr","time","lat","lon","N","E","satellites","ellipsoid","PDOP","HDOP","VDOP",
+                "x","y","alt","geoid","MSL","surfaceAlt","GPS","Individual","local_time","buzz",
+                "dist_origin","bat_date","dt","bat_flight","Y","date","dx","dy","dist","dt","R2n","abs.angle",
+                "rel.angle","id","burst","pkey")
+    vint <- vint[, v_names, drop = FALSE]
+    Vint <- rbind(Vint, vint)
+  }
+  if(length(dts)==1){
+    traj <- as.ltraj(data.frame(X = bat$x, Y = bat$y), date = bat$time, id = factor(bat$bat_flight), burst = factor(bat$bat_flight))
+    temp <- ld(traj)
+    temp$bat_flight <- as.character(temp$burst)
+    temp$time <- temp$date
+    vint <- {}
+    vint <- full_join(bat[,-c(25)], temp, by = c("bat_flight", "time", "x", "y"))
+    vint <- vint[order(vint$time),]
+    v_names<- c("X","timeStr","time","lat","lon","N","E","satellites","ellipsoid","PDOP","HDOP","VDOP",
+                "x","y","alt","geoid","MSL","surfaceAlt","GPS","Individual","local_time","buzz",
+                "dist_origin","bat_date","dt","bat_flight","Y","date","dx","dy","dist","dt","R2n","abs.angle",
+                "rel.angle","id","burst","pkey")
+    vint <- vint[, v_names, drop = FALSE]
+    Vint <- rbind(Vint, vint)
+  }
+}
+
+Vint$buzz01[Vint$buzz == 0] <- 0
+Vint$buzz01[Vint$buzz > 0] <- 1
+
+# summary(bat)
+Vint$bat_flight %>% unique
+names(vint) %in% v_names %>% which
+
+save(Vint, file = "Vint.robj")
+```
+
+
+# summary table
+```{r}
+bats <- unique(v$bat_date)
+sum_viv <- data.frame(ID = unique(v$bat_date), Distance = NA, DepartureTime = NA, ReturnTime = NA, Duration = NA, BuzzCount = NA, AudioInterval = 5, GPSInterval = 15)
+
+for(i in 1:length(bats)){
+  bat_date <- v[v$bat_date == bats[i],]
+  sum_viv$DepartureTime[i] <- as.character(bat_date$time[1] - 7*3600)
+  sum_viv$ReturnTime[i] <- as.character(bat_date$time[nrow(bat_date)] - 7*3600)
+  sum_viv$Duration[i] <- round(difftime(bat_date$time[nrow(bat_date)], bat_date$time[1], units = "hours"), 2)
+  sum_viv$Distance[i] <- round(sum(sqrt(diff(bat_date$x)^2 + diff(bat_date$x)^2))/1000, 2)
+  sum_viv$BuzzCount[i] <- sum(bat_date$buzz)
+  sum_viv$audio_files[i] <- 3*length(which(!is.na(bat_date$buzz)))
+  sum_viv$gps_fixes[i] <- nrow(bat_date)
+}
+
+with(sum_viv, plot(Distance, BuzzCount))
+fit <- lm(BuzzCount~Distance, data = sum_viv)
+summary(fit)
+abline(fit)
+
+sum_viv$capture_weight <- c(NA,27.8,27.2,NA,NA,32.3,27.2,NA,31.1,25.2,NA,NA,34.5,33.8,31.8)
+sum_viv$recapture_weight <- c(NA,27.8,27.2,NA,NA,32.3,27.2,NA,31.1,25.2,NA,NA,34.5,33.8,31.8)
+sum_viv$closest_cap_weight <- c(29.4,29.4,36.1,36.1,33.3,38.3,32.8,29.7,34.2,30.1,29.5,33.8,33.8,33.8,33.8)
+sum_viv$pup_weight <- c(15.3,14.6,10.5,10.9,11.9,9.7,16.7,15.5,17.2,15.3,7.4,8,8,12,12.8)
+sum_viv$weight_change <- sum_viv$closest_cap_weight - sum_viv$recapture_weight
+layout(1)
+with(sum_viv, plot(Distance, closest_cap_weight))
+with(sum_viv, plot(Distance, weight_change))
+with(sum_viv, plot(Distance, pup_weight))
+
+kable(sum_viv, caption = "Table 1: Summary statistics of each flight")
+View(sum_viv)
+mean(sum_viv$Duration)
+sd(sum_viv$Duration)
+range(sum_viv$Duration)
+
+mean(sum_viv$Distance)
+sd(sum_viv$Distance)
+range(sum_viv$Distance)
+
+mean(sum_viv$BuzzCount)
+sd(sum_viv$BuzzCount)
+range(sum_viv$BuzzCount)
+
+mean(sum_viv$closest_cap_weight)
+sd(sum_viv$closest_cap_weight)/sqrt(nrow(sum_viv))
+
+sd(sum_viv$closest_cap_weight)/sqrt(nrow(sum_viv))
+
+sum_viv$bat <- sum_viv$ID
+
+tag <- c(4.4,4.5,4.5,4.6,4.6,4.7,4.7,4.6,
+4.6,4.6,4.6,4.6,4.6,4.6,4.6)
+mean(tag)
+sd(tag)
+
+View(sum_viv[c(11:15, 1:10),])
+Islands
+
+```
+
+# plot tracks
+```{r}
+plot(Viv2015_audio$lon, Viv2015_audio$lat, type = "l", asp = 1, ylab = "Longitude", xlab = "Latitude")
+lines(islands, col = "darkgrey")
+lines(coast, col = "darkgrey")
+points(Viv2015_audio$lon[Viv2015_audio$buzz>0], Viv2015_audio$lat[Viv2015_audio$buzz>0], col = 2)
+legend("topright", legend = "buzz", col = 2, pch = 16)
+
+```
+# plot scan track
+```{r}
+bats <- unique(v$bat_flight)
+for(i in 1:length(bats)){
+  layout(rbind(c(1,2), c(1,3)))
+  bat <- v[v$bat_flight == bats[i],]
+  plot(bat$lon, bat$lat, type = "l", asp = 1, ylab = "Longitude", xlab = "Latitude", main = bats[i])
+  lines(islands, col = "darkgrey")
+  lines(coast, col = "darkgrey")
+  points(bat$lon[bat$buzz>0], bat$lat[bat$buzz>0], col = 2)
+  legend("topright", legend = "buzz", col = 2, pch = 16)
+  
+  plot(bat$time, bat$lon)
+  plot(bat$time, bat$lat)
+  
+}
+  
+
+```
+
+
+# FPT
+## Find optimal radius
+```{r}
+#library(gridBase)
+
+# Determine Optimal Radius
+radii <- seq(round_any(median(Vint$dist, na.rm = TRUE), 100), 5000, by = 25)
+Vfpts <- fpt(va.traj, radii, units = "seconds")
+
+varVfpt <- varlogfpt(Vfpts, graph = TRUE)
+names(varVfpt) <- radii
+
+# Radius <- median(bat_rad) #getmode(bat_rad)
+# hist(bat_rad, breaks = 20, xlab = "Peak Radii", main = paste0("Median = ", Radius, " m"))
+Radius <- as.numeric(names(which.max(colMeans(as.matrix(varVfpt), na.rm = TRUE))))
+
+```
+
+### plot radius
+```{r}
+boxplot(varVfpt, ylab = 'Variance of log(FPT)', xlab = 'Radius (m)', main = paste0("Radius = ", Radius, " m"))
+abline(v = which(radii == Radius), col = 2)
+
+fpt_mean <- colMeans(as.matrix(varVfpt), na.rm = TRUE)
+fpt_se <- {}
+for(i in 1:ncol(varVfpt)){
+  fpt_se[i] <- sd(varVfpt[,i], na.rm = TRUE)# /sqrt(length(na.omit(varVfpt[,i])))
+}
+fpt_rad <- data.frame(fpt_mean, fpt_se, radii)
+```
+
+### plot fpt radius
+```{r}
+p <- ggplot(fpt_rad, aes(x = radii, y = fpt_mean))+geom_line()+ 
+  geom_errorbar(aes(ymin=fpt_mean-fpt_se, ymax=fpt_mean+fpt_se), width=30, colour = "black") + 
+  geom_line() + theme_classic() + xlab("FPT Radius (m)") + ylab("Mean variance (?SD)") +
+  geom_segment(aes(x = 0, y = max(colMeans(as.matrix(varVfpt), na.rm = TRUE)), xend = Radius, yend = max(colMeans(as.matrix(varVfpt), na.rm = TRUE))), linetype = "dashed") +
+  geom_segment(aes(x = Radius, y = 0, xend = Radius, yend = max(colMeans(as.matrix(varVfpt), na.rm = TRUE))), linetype = "dashed") +
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) 
+p + theme(plot.margin = unit(c(1,1,1,1), "cm"))
+# ggpubr::ggarrange(p + theme(plot.margin = unit(c(1,1,1,1), "cm")), labels = "A")
+```
+
+### Determine threshold
+```{r}
+Vfpt <- unlist(fpt(va.traj, Radius, units = "seconds"))
+logVfpts <- na.omit(log(Vfpt))
+mixmdl <- mixtools::normalmixEM(logVfpts)
+plot(mixmdl,which=2)
+lines(density(logVfpts), lty=2, lwd=2)
+idx <- which.min(mixmdl$mu)
+#2.58 99% CI
+#1.96 95% CI
+
+threshold <- mixmdl$mu[idx]+1.96*mixmdl$sigma[idx]
+abline(v = threshold, col = 2, lwd = 2, lty = 2)
+exp(threshold)
+```
+
+### Match FPT data
+```{r}
+Bats <- {}
+for(i in 1:length(va.traj)){
+  # layout(cbind(c(1,2), c(3,4), c(5,6)))
+  bat <- ld(va.traj[i])
+  bat$bat <- burst(va.traj[i])
+  fpts <- unlist(fpt(va.traj[i], Radius))
+  bat$FPT <- fpts
+  bat$FPT01 <- as.numeric(fpts > exp(threshold))
+  Bats <- rbind(Bats, bat)
+}
+
+Split <- strsplit(as.character(Bats$bat), "_", fixed = TRUE)
+Bats$id <- sapply(Split, "[", 1)
+
+summary(Bats)
+# Bats
+i = 1
+Vint$FPT <- NA
+Vint$FPT01 <- NA
+IDX <- {}
+
+for(i in 1:nrow(Vint)){
+  idx <- which(Vint$bat_flight[i] == Bats$bat & Vint$time[i] == Bats$date)
+  if(length(idx) == 0){
+    bidx <- which(Vint$bat_flight[i] == Bats$bat)
+    times <- abs(difftime(Vint$time[i], Bats$date[bidx], units = "sec"))
+    
+    if(times[which.min(times)] < 15){
+      idx <- which.min(times)
+    }
+    # idx <- which.min(abs(Vint$time[bidx] - Bats$date))
+  }
+  # print(idx)
+  IDX <- c(IDX, length(idx))
+  if(length(idx)>0){
+    Vint$FPT[i] <- Bats$FPT[idx]
+    Vint$FPT01[i] <- Bats$FPT01[idx]  
+  }
+  
+}
+
+# Vint$FPT
+# summary(Vint)
+# unique(Vint$bat_flight)
+```
+
+## Optimize FPT threshold by BACC
+```{r}
+exp(threshold)
+threshs <- seq(50, 300, by = 5)
+thresh_FPT_BACC_bat <- {}
+
+for(i in 1:length(threshs)){
+  
+  bats <- unique(Vint$bat_flight)
+  
+  BACC <- data.frame(bats, bacc = NA, thresh = threshs[i])
+  
+  for(j in 1:length(bats)){
+    
+    bat <- Vint[Vint$bat_flight == bats[j],]
+    bat <- bat[!is.na(bat$FPT01) | !is.na(bat$buzz01),]
+    
+    buzz <- factor(bat$buzz01, levels = c("1", "0")) 
+    FPT <- rep(0, nrow(bat))
+    FPT[bat$FPT > threshs[i]] <- 1
+    FPT <- factor(FPT, levels = c("1", "0"))
+    FPT_mat <- confusionMatrix(table(FPT, buzz))
+    BACC$bacc[j] <- FPT_mat$byClass[11]
+  }
+  thresh_FPT_BACC_bat <- rbind(thresh_FPT_BACC_bat, BACC)
+}
+
+thresh_FPT_BACC_bat$cols <- 1
+thresh_FPT_BACC_bat$cols[thresh_FPT_BACC_bat$thresh == 120] <- 2 # what are these numbers? 
+thresh_FPT_BACC_bat$cols[thresh_FPT_BACC_bat$thresh == 155] <- 3 
+
+# png(file = "/Users/edwar/Dropbox/Vivesi2018/Documents/Segmentation/MovementEcology/Revisions/BACC_FPT_thresholds.png", width = 600, height = 400)
+ggplot(thresh_FPT_BACC_bat)+ 
+  geom_boxplot(aes(y = bacc, x = factor(thresh), col = factor(cols)))+ guides(col = FALSE)+
+  xlab("FPT Threshold (secs)")+
+  ylab("Balanced Accuracy")+ylim(c(0,1))+theme_classic() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_abline(slope = 0, intercept = 0.5) # +
+  # geom_vline(xintercept = 15) +
+  # geom_vline(xintercept = 21, col = 2) 
+# dev.off() 
+
+```
+
+
+## Plot FPT data
+```{r}
+
+mixmdl_df <- data.frame(x = mixmdl$x)
+
+ggmix <- ggplot(mixmdl_df, aes(x = x)) + 
+    geom_histogram(aes(y =..density..),
+                   breaks = seq(4, 7, by = .05), 
+                   colour = "black", 
+                   fill = "white") + 
+# stat_function(fun = dnorm, args = list(mean = mixmdl$mu[1], sd = mixmdl$sigma[1]), col = 3)+
+  stat_function(fun = dnorm, args = list(mean = mixmdl$mu[2], sd = mixmdl$sigma[2]), col = 2)+
+  theme_classic() + geom_vline(xintercept = threshold, cex = 1, linetype = 2) + xlab("ln(FPT)")
+
+png(filename = "Seg_Viv_FPT.png", width = 800, height = 600)
+ggpubr::ggarrange(p+theme(text = element_text(size=15)), ggmix+theme(text = element_text(size=15)), labels = c("A", "B"), ncol = 2, nrow = 1)
+dev.off()
+```
+
+
+# Hidden Markov Model
+## 2 state model
+```{r}
+HMM_data <- Vint # Interpolated data
+HMM_data$ID <- HMM_data$bat_flight
+HMM_data_15 <- prepData(HMM_data, type = 'UTM', coordNames = c('x', 'y'))
+
+# 2 state  
+# estimate parameters for HMM
+mixHMM <- normalmixEM(na.omit(HMM_data_15$step))
+# plot(mixHMM,which=2)
+idx <- order(mixHMM$mu)
+
+nbStates <- 2
+stepDist <- "gamma" # step distribution
+angleDist <- "vm" # turning angle distribution
+
+# Fit model to data
+
+mu0 <- c(mixHMM$mu[idx[1]], mixHMM$mu[idx[2]]) # step mean (two parameters: one for each state)
+sigma0 <- c(mixHMM$sigma[idx[1]],  mixHMM$sigma[idx[2]]) # step SD
+zeromass0 <- c(0.01, 0.01) # step zero-mass
+stepPar0 <- c(mu0,sigma0, zeromass0)
+angleMean0 <- c(0,0) # angle mean
+kappa0 <- c(0.1, 0.1) # angle concentration
+anglePar0 <- c(kappa0)
+
+m2_15 <- {}
+try(m2_15 <- fitHMM(data=HMM_data_15,nbStates=nbStates,dist=list(step=stepDist,angle=angleDist),
+                    Par0=list(step=stepPar0,angle=anglePar0)))
+
+if(length(m2_15) == 0){
+  stepPar0 <- c(mu0,sigma0)
+  try(m2_15 <- fitHMM(data=HMM_data_15,nbStates=nbStates,dist=list(step=stepDist,angle=angleDist),
+                      Par0=list(step=stepPar0,angle=anglePar0)))
+}
+try(plot(m2_15, ask = FALSE, breaks = 20, plotTracks = FALSE))
+
+pr <- pseudoRes(m2_15)
+acf(pr$stepRes[!is.na(pr$stepRes)], lag.max = 300)
+png(filename = "HMM2_pr.png", width = 800, height = 600)
+plotPR(m2_15)
+dev.off()
+jarque_bera(m2_15)
+
+idx <- which.min(m2_15$mle$step[1,])
+Vint$HMM2 <- viterbi(m2_15)
+Vint$HMM2_prob <- stateProbs(m2_15)[,idx]
+Vint$X <- Vint$x
+Vint$Y <- Vint$y
+Vint$HMM201 <- as.numeric(Vint$HMM2==idx)
+
+table(Vint$HMM2, Vint$buzz01)
+450/4280
+173/8043
+summary(Vint)
+```  
+
+## 3 state model
+```{r}
+  
+# 3 state
+# estimate parameters for HMM
+mixHMM <- normalmixEM(na.omit(HMM_data_15$step), k = 3)
+# plot(mixHMM,which=2)
+idx <- order(mixHMM$mu)
+
+nbStates <- 3
+stepDist <- "gamma" # step distribution
+angleDist <- "vm" # turning angle distribution
+
+# Fit model to data
+
+mu0 <- c(mixHMM$mu[idx[1]], mixHMM$mu[idx[2]], mixHMM$mu[idx[3]]) # step mean (two parameters: one for each state)
+sigma0 <- c(mixHMM$sigma[idx[1]],  mixHMM$sigma[idx[2]],  mixHMM$sigma[idx[2]]) # step SD
+zeromass0 <- c(0.01, 0.01, 0.01) # step zero-mass
+stepPar0 <- c(mu0,sigma0, zeromass0)
+angleMean0 <- c(0,0,0) # angle mean
+kappa0 <- c(0.1, 0.1, 0.1) # angle concentration
+anglePar0 <- c(kappa0)
+
+m3_15 <- {}
+try(m3_15 <- fitHMM(data=HMM_data_15,nbStates=nbStates,dist=list(step=stepDist,angle=angleDist),
+                    Par0=list(step=stepPar0,angle=anglePar0)))
+
+if(length(m3_15) == 0){
+  stepPar0 <- c(mu0,sigma0)
+  try(m3_15 <- fitHMM(data=HMM_data_15,nbStates=nbStates,dist=list(step=stepDist,angle=angleDist),
+                      Par0=list(step=stepPar0,angle=anglePar0)))
+}
+try(plot(m3_15, ask = FALSE, breaks = 20, plotTracks = TRUE))
+
+pr <- pseudoRes(m3_15)
+acf(pr$stepRes[!is.na(pr$stepRes)], lag.max = 300)
+plotPR(m3_15)
+
+jarque_bera(m3_15)
+
+idx <- which.min(m3_15$mle$step[1,])
+# idx <- which.max(m3_15$mle$step[1,])
+Vint$HMM3 <- viterbi(m3_15)
+Vint$HMM3_prob <- stateProbs(m3_15)[,idx]
+Vint$X <- Vint$x
+Vint$Y <- Vint$y
+Vint$HMM301 <- as.numeric(Vint$HMM3 == idx)
+Vint$buzz01 <- 0
+Vint$buzz01[Vint$buzz > 0] <- 1
+
+table(Vint$buzz01)
+table(Vint$HMM3, Vint$buzz01)
+386/3380
+201/4426
+36/4567
+summary(Vint)
+
+AIC(m3_15, m2_15)
+
+```
+
+## 4 state model
+```{r}
+
+# 4 state
+# estimate parameters for HMM
+mixHMM <- normalmixEM(na.omit(HMM_data_15$step), k = 4)
+# plot(mixHMM,which=2)
+idx <- order(mixHMM$mu)
+
+nbStates <- 4
+stepDist <- "gamma" # step distribution
+angleDist <- "vm" # turning angle distribution
+
+# Fit model to data
+
+mu0 <- c(mixHMM$mu[idx[1]], mixHMM$mu[idx[2]], mixHMM$mu[idx[3]], mixHMM$mu[idx[4]]) # step mean (two parameters: one for each state)
+sigma0 <- c(mixHMM$sigma[idx[1]],  mixHMM$sigma[idx[2]],  mixHMM$sigma[idx[3]],  mixHMM$sigma[idx[4]]) # step SD
+zeromass0 <- c(0.01, 0.01, 0.01, 0.01) # step zero-mass
+stepPar0 <- c(mu0,sigma0, zeromass0)
+angleMean0 <- c(0,0,0,0) # angle mean
+kappa0 <- c(0.1, 0.1, 0.1, 0.1) # angle concentration
+anglePar0 <- c(kappa0)
+
+m4_15 <- {}
+try(m4_15 <- fitHMM(data=HMM_data_15,nbStates=nbStates,dist=list(step=stepDist,angle=angleDist),
+                    Par0=list(step=stepPar0,angle=anglePar0)))
+
+if(length(m4_15) == 0){
+  stepPar0 <- c(mu0,sigma0)
+  try(m4_15 <- fitHMM(data=HMM_data_15,nbStates=nbStates,dist=list(step=stepDist,angle=angleDist),
+                      Par0=list(step=stepPar0,angle=anglePar0)))
+}
+try(plot(m4_15, ask = FALSE, breaks = 20, plotTracks = TRUE))
+
+pr <- pseudoRes(m4_15)
+acf(pr$stepRes[!is.na(pr$stepRes)], lag.max = 300)
+plotPR(m4_15)
+
+idx <- which.min(m4_15$mle$step[1,])
+Vint$HMM4 <- viterbi(m4_15)
+Vint$HMM4_prob <- stateProbs(m4_15)[,idx]
+Vint$X <- Vint$x
+Vint$Y <- Vint$y
+Vint$HMM401 <- as.numeric(Vint$HMM4==idx)
+Vint$buzz01 <- 0
+Vint$buzz01[Vint$buzz > 0] <- 1
+
+table(Vint$buzz01)
+table(Vint$HMM4, Vint$buzz01)
+376/3689
+212/4482
+49/5203
+summary(Vint)
+
+AIC(m4_15, m3_15, m2_15)
+
+```
+
+# HMM 2 vs 3
+## BACC by bat
+```{r}
+bats <- unique(Vint$bat_flight)
+
+# True Positive Rate
+TPR_HMM <- data.frame(bat = bats, HMM2 = NA, HMM3 = NA)
+# True Negative Rate
+TNR_HMM <- data.frame(bat = bats,HMM2 = NA, HMM3 = NA)
+# Balanced Accuracy
+BACC_HMM <- data.frame(bat = bats, HMM2 = NA, HMM3 = NA)
+
+i = 1
+for(i in 1:length(bats)){
+  bat <- Vint[Vint$bat_flight == bats[i],]
+
+  # TPR buzz
+  TPR_HMM$HMM2[i] <- length(which(bat$buzz01 == 1 & bat$HMM201 == 1))/length(which(bat$buzz01 == 1))
+  TPR_HMM$HMM3[i] <- length(which(bat$buzz01 == 1 & bat$HMM301 == 1))/length(which(bat$buzz01 == 1))
+  
+  # TNR buzz
+  TNR_HMM$HMM2[i] <- length(which(bat$buzz01 == 0 & bat$HMM201 == 0))/length(which(bat$buzz01 == 0))
+  TNR_HMM$HMM3[i] <- length(which(bat$buzz01 == 0 & bat$HMM301 == 0))/length(which(bat$buzz01 == 0))
+  
+  # BACC buzz
+  BACC_HMM$HMM2[i] <- (TPR_HMM$HMM2[i] + TNR_HMM$HMM2[i])/2
+  BACC_HMM$HMM3[i] <- (TPR_HMM$HMM3[i] + TNR_HMM$HMM3[i])/2
+}
+
+BACC_HMM
+BACC_HMM$HMM2 %>% median
+BACC_HMM$HMM3 %>% median
+
+BACC_HMM$HMM2 %>% mean
+BACC_HMM$HMM3 %>% mean
+
+plot(BACC_HMM[,2:3])
+plot(BACC_HMM[,2] - BACC_HMM[,3])
+mean(BACC_HMM[,2] - BACC_HMM[,3])
+
+png(filename = "HMM2_vs_3.png", width = 800, height = 600)
+boxplot(BACC_HMM$HMM2, BACC_HMM$HMM3, names = c("HMM2", "HMM3"))
+dev.off()
+
+Vint$HMM <- Vint$HMM2
+Vint$HMM01 <- Vint$HMM201
+```
+
+# Plot HMM 2 and 3 
+```{r}
+bats <- unique(Vint$bat_flight)
+bat <- Vint[Vint$bat_flight == bats[15],]
+### add
+layout(rbind(c(1,2), c(1,2)))
+# sputm <- SpatialPoints(cbind(bat$x, bat$y), proj4string=CRS("+proj=utm +zone=12 +datum=WGS84"))  
+# spgeo <- spTransform(sputm, CRS("+proj=yglat +datum=WGS84"))
+# bat$lat <- spgeo@coords[,1]
+# bat$y <- spgeo@coords[,2]
+with(bat, plot(x,y,asp = 1,type = "l", xlab = "Latitude", ylab = "Longitude"))
+with(bat[bat$HMM201 == 1,], points(x, y, col = "orange"))
+#with(bat[bat$buzz01 == 1,], points(x,y, col = 2, pch = 8))
+lines(Coast)
+lines(Islands)
+legend("topright", legend = c("Buzz", "HMM2"), pch = c(8,1), col = c(2, "orange"))
+
+# sputm <- SpatialPoints(cbind(bat$x, bat$y), proj4string=CRS("+proj=utm +zone=12 +datum=WGS84"))  
+# spgeo <- spTransform(sputm, CRS("+proj=ygx +datum=WGS84"))
+# bat$x <- spgeo@coords[,1]
+# bat$y <- spgeo@coords[,2]
+with(bat, plot(x,y,asp = 1,type = "l", xlab = "Latitude", ylab = "Longitude"))
+with(bat[bat$HMM301 == 1,], points(x, y, col = "orange"))
+# with(bat[bat$buzz01 == 1,], points(x,y, col = 2, pch = 8))
+lines(Coast)
+lines(Islands)
+legend("topright", legend = c("Buzz", "HMM3"), pch = c(8,1), col = c(2, "orange"))
+
+```
+
+# CVCP analysis
+```{r}
+cl <- makeCluster(2)
+registerDoParallel(cl)
+
+V$Z <- V$x + 1i*V$y
+
+bats <- unique(V$bat_flight)
+phaseTables <- {}
+Bats <- {}
+
+#pdf(file = "Smoove_Vivesi_20180321_UCVCP_noCW_AIC.pdf")
+i = 8
+j = 1
+for(i in 1:length(bats)){
+  bat <- V[V$bat_flight == bats[i],]
+  idx <- c(1, which(dtime(bat$time, units = "secs") > 5000), nrow(bat))
+  for(j in 1:(length(idx)-1)){
+    Bat <- bat[idx[j]:idx[j+1],]
+    Z <- Bat$Z
+    Bat$T <- as.numeric(Bat$time - min(Bat$time))
+    T <- Bat$T
+    if(length(Z) > 0){
+      batSweep <- {}
+      try(batSweep <- sweepRACVM(Z=Z, T=T, windowsize = 8*DT, windowstep = 5*DT, model = "UCVM", time.unit = "secs", .parallel = TRUE))
+      if(length(batSweep) == 0){
+        try(batSweep <- sweepRACVM(Z=Z, T=T, windowsize = 10*DT, windowstep = 5*DT, model = "UCVM", time.unit = "secs", .parallel = TRUE))
+        print(bats[i])
+        print(paste0("Window size: ", 10))
+      }
+      if(length(batSweep) == 0){
+        try(batSweep <- sweepRACVM(Z=Z, T=T, windowsize = 12*DT, windowstep = 5*DT, model = "UCVM", time.unit = "secs", .parallel = TRUE))
+        print(bats[i])
+        print(paste0("Window size: ", 10))
+      }
+      if(length(batSweep)>0){
+        layout(1)
+        print(bats[i])
+        # plotWindowSweep(batSweep)
+        # image(batSweep)
+
+        # batCP.table.model <- batSweep %>% findCandidateChangePoints(clusterwidth = 120) %>%  getCPtable(modelset = c("UCVCP", "ACVCP"), criterion = "AIC")
+        batCP.table <- {}
+        CW <- 30
+        if(CW < DT){CW <- DT}
+        try(batCP.table <- batSweep %>% findCandidateChangePoints(clusterwidth = CW) %>%  getCPtable(modelset = "UCVM", criterion = "BIC"))
+        if(length(batCP.table) > 0){
+          ## no documentation for findCand function
+          plotWindowSweep(batSweep, xpd = FALSE)
+          abline(v = batCP.table$CP, xpd = FALSE)
+          batPhases <- with(Bat, estimatePhases(batCP.table))
+
+          # Check if any segments should be ACVCP
+          CPs <- c(0, batCP.table$CP, max(T))
+          for(ii in 1:(length(CPs)-1)){
+            seg <- which.min(abs(T - CPs[ii])):which.min(abs(T - CPs[ii+1]))
+            temp <- estimateRACVM(Z = Z[seg], T = T[seg], compare.models = TRUE, modelset = c("ACVM", "UCVM"))
+            if(which(temp$CompareTable$deltaBIC == 0) == 1){
+              batPhases[[as.roman(ii)]]$model <- "ACVM"
+            }
+          }
+
+          cols <- rich.colors(length(batPhases))
+          T.cuts <- c(T[1], batCP.table$CP, T[length(T)])
+          Z.cols <- cols[cut(T, T.cuts, include.lowest = TRUE)]
+          phaseTable <- summarizePhases(batPhases)
+          # phaseTable$model <- phaseTableModel$model
+          phaseTable$bat <- Bat$bat_flight[1]
+
+          Bat$Phase <- findInterval(T, phaseTable$start)
+          Bat$CVCP <- ""
+          Bat$rms <- NA
+          Bat$tau <- NA
+
+          for(k in 1:nrow(phaseTable)){
+            try(Bat$CVCP[which(Bat$Phase == k)] <- as.character(phaseTable$model[k]))
+            try(Bat$rms[which(Bat$Phase == k)] <- phaseTable$rms[k])
+            try(Bat$tau[which(Bat$Phase == k)] <- phaseTable$tau[k])
+          }
+          
+
+          try(Bats <- rbind(Bats, Bat))
+          try(phaseTables <- rbind(phaseTables, phaseTable))
+        }
+      }
+      try({
+        layout(rbind(c(1,1,2), c(1,1,2), c(1,1,3), c(1,1,3)))
+        par(mar = c(1,5,1,5), oma = c(4,0,1,1))
+        plot(Z, asp=1, type="l", xpd=FALSE, xlab = "X (UTM)", ylab = "Y (UTM)")
+        mtext(Bat$bat_flight[1], side = 3, font = 3, adj = 0)
+        points(Z, col=Z.cols, pch=21, bg = alpha(Z.cols, 0.5), cex=0.8)
+        points(Z[Bat$buzz > 0], col = 2, cex = 2)
+        legend("topright", legend = paste0(phaseTable$phase, ": ", phaseTable$model),
+               fill=cols, ncol=1, bty="n", title = "Phase: model")
+        par(mar=c(1,0,1,0), xpd=FALSE)
+        plotPhaseParameter("tau", batPhases, ylab="time", xaxt="n", xlab="", col=cols, ylim = c(0, 500)) #, finite = TRUE)
+        with(Bat[Bat$buzz > 0,], points(T, tau, col = 2))
+        plotPhaseParameter("rms", batPhases, ylab="distance / time", xlab="time", col=cols, ylim = c(0, 15))
+        abline(h = 0)
+        with(Bat[Bat$buzz > 0,], points(T, rms, col = 2))
+      })
+    }
+  }
+}
+
+# dev.off()
+
+save(Bats, phaseTables, batPhases, Bat, T, batSweep, Z.cols, cols, batCP.table, Vint, V, v, vint, m2_15,  file = paste0("CVCP_Vivesi_DT_", DT, ".robj"))
+```
+
+```{r}
+DT = 15
+load(paste0("CVCP_Vivesi_DT_", DT, ".robj"))
+
+### CVCP plot
+layout(rbind(c(1,2), c(1,3), c(1,4)))
+par(mar = c(4,5,0,1), oma = c(2,2,2,2))
+plot(Bat$lon, Bat$lat, asp = 1, type = "l", xlab = "Longitude", ylab = "Latitude")
+#points(Bat$lon, Bat$lat, col = Z.cols)
+with(Bat[Bat$CVCP == "UCVM",], points(lon, lat, col = "orange"))
+with(Bat[Bat$buzz > 0,], points(lon, lat, col = 2, cex = 1.5, pch = 8))
+lines(islands)
+lines(coast)
+# legend("topright", legend = paste0(phaseTable$phase, ": ", phaseTable$model),
+#        fill=cols, ncol=1, bty="n", title = "Phase: model", cex = 0.75)
+mtext("Viv8 2015-06-01", side = 3, at = -113.175, font = 3, 
+      adj = 0)
+plotWindowSweep(batSweep, xpd = FALSE, xaxt="n", xlab = "")
+abline(v = batCP.table$CP, xpd = FALSE, col = 1)
+#with(Bat[Bat$buzz > 0,], abline(v = T, col = 2))
+mtext("window sweep", side = 3, at = 0, font = 3, 
+      adj = 0)
+plotPhaseParameter("tau", batPhases, ylab="time", xaxt="n", xlab="", col=cols, ylim = c(0, 500)) #, finite = TRUE)
+with(Bat[Bat$buzz > 0,], points(T, tau, col = 2, pch = 8))
+plotPhaseParameter("rms", batPhases, ylab="distance / time", xlab="time (secs)", col=cols, ylim = c(0, 15), label = FALSE)
+abline(h = 0)
+mtext("rms speed", side = 3, at = 0, font = 3, 
+      adj = 0)
+with(Bat[Bat$buzz > 0,], points(T, rms, col = 2, pch = 8))
+```
+
+```{r}
+Final <- Bats
+
+Final$CVCP01 <- NA
+Final$CVCP01[which(Final$CVCP == "ACVM")] <- 0
+Final$CVCP01[which(Final$CVCP == "UCVM")] <- 1
+Final$buzz01[Final$buzz == 0] <- 0
+Final$buzz01[Final$buzz > 0] <- 1
+
+Bats$buzz01 <- 0
+Bats$buzz01[Bats$buzz > 0] <- 1
+buzz <- factor(Bats$buzz01, levels = c("1", "0")) 
+CVCP <- rep(0, nrow(Bats))
+CVCP[Bats$CVCP == "UCVM"] <- 1
+CVCP <- factor(CVCP, levels = c("1", "0"))
+
+CVCP_mat <- confusionMatrix(table(CVCP, buzz))
+```
+
+# merge Final and Vint
+```{r}
+i = 1000
+for(i in 1:nrow(Final)){
+  idx <- which(Final$bat_flight[i] == Vint$bat_flight & Final$x[i] == Vint$x & Final$y[i] == Vint$y)
+  if(length(idx) == 1){
+    Final$FPT[i] <- Vint$FPT[idx]
+    Final$FPT01[i] <- Vint$FPT01[idx]
+    Final$HMM[i] <- Vint$HMM[idx]
+    Final$HMM_prob[i] <- Vint$HMM_prob[idx]
+    Final$HMM01[i] <- Vint$HMM01[idx]
+    Final$HMM3[i] <- Vint$HMM3[idx]
+    Final$HMM3_prob[i] <- Vint$HMM3_prob[idx]
+    Final$HMM301[i] <- Vint$HMM301[idx]
+  }
+  if(length(idx) != 1) print(i)
+}
+
+summary(Final)
+
+```
+
+```{r}
+summary(Bats$tau)
+summary(Bats$rms)
+
+summary(Bats$tau[Bats$CVCP == "ACVM"])
+summary(Bats$tau[Bats$CVCP == "UCVM"])
+
+summary(Bats$rms[Bats$CVCP == "ACVM"])
+summary(Bats$rms[Bats$CVCP == "UCVM"])
+
+
+
+lowerq = quantile(Final$tau, na.rm = TRUE)[2]
+upperq = quantile(Final$tau, na.rm = TRUE)[4]
+iqr = upperq - lowerq #Or use IQR(data)
+
+mild.threshold.upper = (iqr * 1.5) + upperq
+mild.threshold.lower = lowerq - (iqr * 1.5)
+
+extreme.threshold.upper.tau = (iqr * 3) + upperq
+extreme.threshold.lower = lowerq - (iqr * 3)
+
+lowerq = quantile(Final$rms, na.rm = TRUE)[2]
+upperq = quantile(Final$rms, na.rm = TRUE)[4]
+iqr = upperq - lowerq #Or use IQR(data)
+
+mild.threshold.upper = (iqr * 1.5) + upperq
+mild.threshold.lower = lowerq - (iqr * 1.5)
+
+extreme.threshold.upper.rms = (iqr * 3) + upperq
+extreme.threshold.lower = lowerq - (iqr * 3)
+
+Final$cosrel.angle <- cos(Final$rel.angle)
+
+
+
+Final$logtau <- log(Final$tau)
+Final$logFPT <- log(Final$FPT)
+# Final$roll_elip <- rollmean(Final$elipsoid, 20, na.pad = TRUE)
+
+Final$speed <- Final$dist/Final$dt.y
+max(Final$speed, na.rm = TRUE)
+hist(Final$speed, breaks = 100, freq = FALSE)
+hist(Final$rel.angle, breaks = 100, freq = FALSE)
+# Final$persis_vel <- Final$speed* Final$cosrel.angle
+```
+
+# EMbC
+```{r}
+library(EMbC)
+
+data <- data.frame(Final$time, Final$lon, Final$lat)
+str(data)
+Vembc <- stbc(data, info = -1)
+par(mfrow = c(1,1))
+sctr(Vembc)
+
+view(Vembc, lims = c(1,450))
+
+stts(Vembc)
+# table(Final$embc, Vembc@A)
+Final$embc <- Vembc@A
+
+Final$embc01 <- NA
+Final$embc01[Final$embc > 0] <- 0
+Final$embc01[Final$embc == 2 | Final$embc == 4] <- 1
+
+with(Final, plot(lon, lat, type = "l", asp = 1))
+with(Final[Final$embc01 == 1,], points(lon, lat, col = 2))
+
+table(Final$embc, Final$buzz01)
+```
+## embc grouping BACC
+```{r}
+
+bats <- unique(Vint$bat_flight)
+
+# True Positive Rate
+TPR_embc <- data.frame(bat = bats, embc2 = NA, embc24 = NA)
+# True Negative Rate
+TNR_embc <- data.frame(bat = bats, embc2 = NA, embc24 = NA)
+# Balanced Accuracy
+BACC_embc <- data.frame(bat = bats, embc2 = NA, embc24 = NA)
+
+i = 1
+for(i in 1:length(bats)){
+  bat <- Final[Final$bat_flight == bats[i],]
+  
+  # EMBC 1
+  bat$embc01 <- NA
+  bat$embc01[bat$embc > 0] <- 0
+  bat$embc01[bat$embc == 1] <- 1
+  
+  TNR_embc$embc1[i] <- length(which(bat$buzz01 == 0 & bat$embc01 == 0))/length(which(bat$buzz01 == 0))
+  TPR_embc$embc1[i] <- length(which(bat$buzz01 == 1 & bat$embc01 == 1))/length(which(bat$buzz01 == 1))
+  BACC_embc$embc1[i] <- (TPR_embc$embc1[i] + TNR_embc$embc1[i])/2
+  
+  # EMBC 2
+  bat$embc01 <- NA
+  bat$embc01[bat$embc > 0] <- 0
+  bat$embc01[bat$embc == 2] <- 1
+  
+  TNR_embc$embc2[i] <- length(which(bat$buzz01 == 0 & bat$embc01 == 0))/length(which(bat$buzz01 == 0))
+  TPR_embc$embc2[i] <- length(which(bat$buzz01 == 1 & bat$embc01 == 1))/length(which(bat$buzz01 == 1))
+  BACC_embc$embc2[i] <- (TPR_embc$embc2[i] + TNR_embc$embc2[i])/2
+  
+  # EMBC 3
+  bat$embc01 <- NA
+  bat$embc01[bat$embc > 0] <- 0
+  bat$embc01[bat$embc == 3] <- 1
+  
+  TNR_embc$embc3[i] <- length(which(bat$buzz01 == 0 & bat$embc01 == 0))/length(which(bat$buzz01 == 0))
+  TPR_embc$embc3[i] <- length(which(bat$buzz01 == 1 & bat$embc01 == 1))/length(which(bat$buzz01 == 1))
+  BACC_embc$embc3[i] <- (TPR_embc$embc3[i] + TNR_embc$embc3[i])/2
+  
+  # EMBC 4
+  bat$embc01 <- NA
+  bat$embc01[bat$embc > 0] <- 0
+  bat$embc01[bat$embc == 4] <- 1
+  
+  TNR_embc$embc4[i] <- length(which(bat$buzz01 == 0 & bat$embc01 == 0))/length(which(bat$buzz01 == 0))
+  TPR_embc$embc4[i] <- length(which(bat$buzz01 == 1 & bat$embc01 == 1))/length(which(bat$buzz01 == 1))
+  BACC_embc$embc4[i] <- (TPR_embc$embc4[i] + TNR_embc$embc4[i])/2
+  
+  
+  
+  # EMBC 24
+  bat$embc01 <- NA
+  bat$embc01[bat$embc > 0] <- 0
+  bat$embc01[bat$embc == 2 | bat$embc == 4] <- 1
+  
+  TNR_embc$embc24[i] <- length(which(bat$buzz01 == 0 & bat$embc01 == 0))/length(which(bat$buzz01 == 0))
+  TPR_embc$embc24[i] <- length(which(bat$buzz01 == 1 & bat$embc01 == 1))/length(which(bat$buzz01 == 1))
+  BACC_embc$embc24[i] <- (TPR_embc$embc24[i] + TNR_embc$embc24[i])/2
+}
+
+BACC_embc
+BACC_embc$embc2 %>% median
+BACC_embc$embc24 %>% median
+
+BACC_embc$embc2 %>% mean
+BACC_embc$embc24 %>% mean
+
+plot(BACC_embc[,2:3])
+plot(BACC_embc[,2] - BACC_embc[,3])
+mean(BACC_embc[,2] - BACC_embc[,3])
+
+png(filename = "EMbC_BACC.png", width = 800, height = 600)
+boxplot(BACC_embc$embc1, BACC_embc$embc2, BACC_embc$embc3, BACC_embc$embc4, BACC_embc$embc24, 
+        ylab = "Balanced Accuracy", names = c("LL", "LH", "HL", "HH", "LH-HH"))
+abline(h = 0.5, lty = 2)
+dev.off() 
+
+
+```
+
+
+
+# k-means
+```{r}
+k.max <- 5
+data <- as.matrix(na.omit(data.frame(index = 1:nrow(Final), speed = Final$speed, turn = abs(Final$rel.angle)*180/pi)))
+wss <- sapply(1:k.max, 
+              function(k){kmeans(data, k, nstart=50,iter.max = 15 )$tot.withinss})
+wss
+plot(1:k.max, wss,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+
+batCluster <- kmeans(data[,2:3], 2, nstart = 20)
+
+plot(data[,2:3], col = as.numeric(batCluster$cluster), xlab = "speed (m/s)", ylab = expression(paste("abs(turn angle) ( ",degree,")")))
+legend("topright", legend = c("forage", "commute"), col = c(2,1), pch = 1)
+abline(h = 75, lty = 2)
+
+Final$kmC <- NA
+
+idx <- which.min(table(batCluster$cluster))
+
+Final$kmC[data[,1]] <- batCluster$cluster
+
+if(idx == 1){
+  Final$kmC[Final$kmC == 2] <- 0  
+}
+if(idx == 2){
+  Final$kmC <- Final$kmC - 1  
+}
+
+with(Final, plot(x,y, col = kmC+1, asp = 1))
+
+png(filename = "/Users/edwar/Dropbox/Vivesi2018/Documents/Segmentation/MovementEcology/Revisions/VSeg_FigS2.png", width = 800, height = 600)
+ggplot(Final, aes(speed, abs(rel.angle) * 180/pi, col = kmC)) + 
+  geom_bin2d() + geom_abline(intercept = 75, slope = 0, lwd = 1, lty = 2, col = "orange") + ylab(expression(paste("abs(turn angle) ( ",degree,")"))) + xlab("speed (m/s)") + theme(text = element_text(size = 20))
+dev.off()
+  # geom_hex()
+  # geom_bin2d()
+  # geom_density2d()
+  # 
+  # stat_density_2d(aes(fill = ..level..), geom = "polygon")
+  # stat_density_2d(aes(fill = ..level..), geom = "polygon", colour="white")
+
+confusionMatrix(table(Final$kmC, Final$buzz01))
+
+length(which(is.na(Final$kmC)))
+
+```
+
+# TPR TNR
+```{r}
+# True Positive Rate
+layout(rbind(c(1,2)))
+
+barplot(100*c(
+  length(which(Final$buzz01 == 1 & Final$kmC == 1))/length(which(Final$buzz01 == 1)),
+  length(which(Final$buzz01 == 1 & Final$FPT01 == 1))/length(which(Final$buzz01 == 1)), # 10.3
+  length(which(Final$buzz01 == 1 & Final$HMM01 == 1))/length(which(Final$buzz01 == 1)), # 10.4
+  length(which(Final$buzz01 == 1 & Final$embc01 == 1))/length(which(Final$buzz01 == 1)), # 10.3
+  length(which(Final$buzz01 == 1 & Final$CVCP01 == 1))/length(which(Final$buzz01 == 1))), # 9.7 
+  names = c("kmC", "FPT", "HMM", "EMbC", "CVCP"), las = 2,
+  ylab = "% buzz in foraging", ylim = c(0,100), col = 1, xlab = "")
+
+# True Negative Rate
+barplot(100*c(
+  length(which(Final$buzz01 == 0 & Final$kmC == 0))/length(which(Final$buzz01 == 0)), # 97.7
+  length(which(Final$buzz01 == 0 & Final$FPT01 == 0))/length(which(Final$buzz01 == 0)), # 97.7
+  length(which(Final$buzz01 == 0 & Final$HMM01 == 0))/length(which(Final$buzz01 == 0)), # 98.0
+  length(which(Final$buzz01 == 0 & Final$embc01 == 0))/length(which(Final$buzz01 == 0)), # 97.7
+  length(which(Final$buzz01 == 0 & Final$CVCP01 == 0))/length(which(Final$buzz01 == 0)) # 97.6
+  ), names = c("k-means", "FPT", "HMM", "EMbC", "CVCP"), ylab = "% non-buzz in commuting", 
+  ylim = c(0,100), xpd = FALSE, col = 1, las = 2)
+
+```
+
+# balanced accuracy
+```{r}
+
+bal_acc <- {}
+
+kmC_buzz_CM <- confusionMatrix(factor(Final$kmC), factor(Final$buzz01))
+bal_acc[1] <- kmC_buzz_CM$byClass[11]  
+
+tt <- kmC_buzz_CM$table
+
+#EMbC
+EMbC_buzz_CM <- confusionMatrix(factor(Final$embc01), factor(Final$buzz01))
+bal_acc[2] <- EMbC_buzz_CM$byClass[11]  
+
+tt <- EMbC_buzz_CM$table
+
+#FPT
+FPT_buzz_CM <- confusionMatrix(factor(Final$FPT01), factor(Final$buzz01))
+bal_acc[3] <- FPT_buzz_CM$byClass[11]  
+
+tt <- FPT_buzz_CM$table
+
+#HMM
+HMM_buzz_CM <- confusionMatrix(factor(Final$HMM01), factor(Final$buzz01))
+bal_acc[4] <- HMM_buzz_CM$byClass[11]  
+
+tt <- HMM_buzz_CM$table
+
+#CVCP
+CVCP_buzz_CM <- confusionMatrix(factor(Final$CVCP01), factor(Final$buzz01))
+bal_acc[5] <- CVCP_buzz_CM$byClass[11]  
+
+tt <- CVCP_buzz_CM$table
+
+layout(rbind(c(1,2,3)))
+
+barplot(100*c(
+  length(which(Final$buzz01 == 1 & Final$kmC == 1))/length(which(Final$buzz01 == 1)), # 68.4%
+  length(which(Final$buzz01 == 1 & Final$embc01 == 1))/length(which(Final$buzz01 == 1)), # 68.4%
+  length(which(Final$buzz01 == 1 & Final$FPT01 == 1))/length(which(Final$buzz01 == 1)), # 68.4%
+  length(which(Final$buzz01 == 1 & Final$HMM01 == 1))/length(which(Final$buzz01 == 1)), # 68.5%
+  length(which(Final$buzz01 == 1 & Final$CVCP01 == 1))/length(which(Final$buzz01 == 1)) # 63.1%
+  ), names = c("kmC", "FPT", "HMM", "EMbC", "CVCP"), ylab = "% buzz in foraging", 
+  ylim = c(0,100), xpd = FALSE, col = 1, las = 2, main = "True Positive Rate")
+
+barplot(100*c(
+  length(which(Final$buzz01 == 0 & Final$kmC == 0))/length(which(Final$buzz01 == 0)), # 80.7
+  length(which(Final$buzz01 == 0 & Final$embc01 == 0))/length(which(Final$buzz01 == 0)), # 80.7
+  length(which(Final$buzz01 == 0 & Final$FPT01 == 0))/length(which(Final$buzz01 == 0)), # 80.7
+  length(which(Final$buzz01 == 0 & Final$HMM01 == 0))/length(which(Final$buzz01 == 0)), # 81.6
+  length(which(Final$buzz01 == 0 & Final$CVCP01 == 0))/length(which(Final$buzz01 == 0)) # 78.5
+  ), names = c("kmC", "FPT", "HMM", "EMbC", "CVCP"), ylab = "% no buzz in commuting", 
+  ylim = c(0,100), xpd = FALSE, col = 1, las = 2, , main = "True Negative Rate")
+  
+  barplot(100*bal_acc[1:5], ylim = c(0, 100), xpd = FALSE, col = 1, 
+          names = c("kmC", "FPT", "HMM", "EMbC", "CVCP"), ylab = "%", las = 2, main = "Balanced Accuracy")
+  
+```
+
+## by bat
+```{r}
+bats <- unique(Final$bat_flight)
+
+# True Positive Rate
+TPR_buzz <- data.frame(bat = bats, kmC = NA, FPT = NA, HMM = NA, EMbC = NA, CVCP = NA)
+# True Negative Rate
+TNR_buzz <- data.frame(bat = bats, kmC = NA, FPT = NA, HMM = NA, EMbC = NA, CVCP = NA)
+# Balanced Accuracy
+BACC_buzz <- data.frame(bat = bats, kmC = NA, FPT = NA, HMM = NA, EMbC = NA, CVCP = NA, dist = NA, buzz = NA, duration = NA)
+
+i = 1
+for(i in 1:length(bats)){
+  bat <- Final[Final$bat_flight == bats[i],]
+
+  # TPR buzz
+  TPR_buzz$kmC[i] <- length(which(bat$buzz01 == 1 & bat$kmC == 1))/length(which(bat$buzz01 == 1))
+  TPR_buzz$EMbC[i] <- length(which(bat$buzz01 == 1 & bat$embc01 == 1))/length(which(bat$buzz01 == 1))
+  TPR_buzz$FPT[i] <- length(which(bat$buzz01 == 1 & bat$FPT01 == 1))/length(which(bat$buzz01 == 1))
+  TPR_buzz$HMM[i] <- length(which(bat$buzz01 == 1 & bat$HMM01 == 1))/length(which(bat$buzz01 == 1))
+  TPR_buzz$CVCP[i] <- length(which(bat$buzz01 == 1 & bat$CVCP01 == 1))/length(which(bat$buzz01 == 1))
+  
+  # TNR buzz
+  TNR_buzz$kmC[i] <- length(which(bat$buzz01 == 0 & bat$kmC == 0))/length(which(bat$buzz01 == 0))
+  TNR_buzz$EMbC[i] <- length(which(bat$buzz01 == 0 & bat$embc01 == 0))/length(which(bat$buzz01 == 0))
+  TNR_buzz$FPT[i] <- length(which(bat$buzz01 == 0 & bat$FPT01 == 0))/length(which(bat$buzz01 == 0))
+  TNR_buzz$HMM[i] <- length(which(bat$buzz01 == 0 & bat$HMM01 == 0))/length(which(bat$buzz01 == 0))
+  TNR_buzz$CVCP[i] <- length(which(bat$buzz01 == 0 & bat$CVCP01 == 0))/length(which(bat$buzz01 == 0))
+  
+  # BACC buzz
+  BACC_buzz$kmC[i] <- (TPR_buzz$kmC[i] + TNR_buzz$kmC[i])/2
+  BACC_buzz$EMbC[i] <- (TPR_buzz$EMbC[i] + TNR_buzz$EMbC[i])/2
+  BACC_buzz$FPT[i] <- (TPR_buzz$FPT[i] + TNR_buzz$FPT[i])/2
+  BACC_buzz$HMM[i] <- (TPR_buzz$HMM[i] + TNR_buzz$HMM[i])/2
+  BACC_buzz$CVCP[i] <- (TPR_buzz$CVCP[i] + TNR_buzz$CVCP[i])/2
+  BACC_buzz$dist[i] <- sum(bat$dist, na.rm = TRUE)
+  BACC_buzz$buzz[i] <- sum(bat$buzz01, na.rm = TRUE)
+  BACC_buzz$duration[i] <- sum(bat$dt, na.rm = TRUE)
+
+}
+
+TNR_buzz_mlt <- melt(TNR_buzz)
+
+```
+
+# Table S4: raw 
+```{r}
+bats <- unique(Final$bat_flight)
+i = 15
+
+#for(i in 1:length(bats)){
+  bat <- Final[Final$bat_flight == bats[i],]
+  bats[i]
+  nrow(bat)
+  table(bat$kmC)
+  table(bat$embc01)
+  table(bat$FPT01)
+  table(bat$HMM01)
+  table(bat$HMM301)
+  table(bat$CVCP01)
+  
+  sum(bat$buzz)
+  sum(bat$buzz[bat$kmC ==1], na.rm = TRUE)
+  sum(bat$buzz[bat$embc01 ==1], na.rm = TRUE)
+  sum(bat$buzz[bat$FPT01 ==1], na.rm = TRUE)
+  sum(bat$buzz[bat$HMM01 ==1], na.rm = TRUE)
+  # sum(bat$buzz[bat$HMM301 ==1], na.rm = TRUE)
+  sum(bat$buzz[bat$CVCP01 ==1], na.rm = TRUE)
+  
+# }
+
+```
+
+
+# percent buzz in foraging?
+```{r}
+table(Final$buzz, Final$kmC)
+(230+21*2)/sum(Final$buzz) # 42.0 %
+
+table(Final$buzz, Final$embc01)
+(282+26*2)/sum(Final$buzz) # 51.5%
+
+table(Final$buzz, Final$FPT01)
+(379+30*2)/sum(Final$buzz) # 67.7%
+
+table(Final$buzz, Final$HMM01)
+(411+32*2)/sum(Final$buzz) # 73.3%
+
+table(Final$buzz, Final$CVCP01)
+(374+29*2)/sum(Final$buzz) # 66.7%
+
+```
+
+## TPR BACC summary
+```{r}
+print("TPR median")
+c(TPR_buzz$kmC %>% median,
+  TPR_buzz$FPT %>% median,
+  TPR_buzz$HMM %>% median,
+  TPR_buzz$EMbC %>% median,
+  TPR_buzz$CVCP %>% median)
+
+print("BACC median")
+c(BACC_buzz$kmC %>% median,
+  BACC_buzz$FPT %>% median,
+  BACC_buzz$HMM %>% median,
+  BACC_buzz$EMbC %>% median,
+  BACC_buzz$CVCP %>% median)
+
+print("BACC mean")
+c(BACC_buzz$kmC %>% mean,
+  BACC_buzz$FPT %>% mean,
+  BACC_buzz$HMM %>% mean,
+  BACC_buzz$EMbC %>% mean,
+  BACC_buzz$CVCP %>% mean)
+
+print("BACC max")
+c(BACC_buzz$kmC %>% max,
+  BACC_buzz$FPT %>% max,
+  BACC_buzz$HMM %>% max,
+  BACC_buzz$EMbC %>% max,
+  BACC_buzz$CVCP %>% max)
+
+```
+
+# How does BACC related to bat flight measures
+```{r}
+BACC_buzz_mlt <- melt(BACC_buzz[,1:6], by = bat)
+
+BACC_buzz_mlt$duration <- rep(BACC_buzz$duration, 5)
+BACC_buzz_mlt$distance <- rep(BACC_buzz$dist, 5)
+BACC_buzz_mlt$buzz <- rep(BACC_buzz$buzz, 5)
+
+ggplot(BACC_buzz_mlt, aes(y = value, x = distance, col = variable))+geom_point()+geom_smooth(se = FALSE)
+ggplot(BACC_buzz_mlt, aes(y = value, x = buzz, col = variable))+geom_point()+geom_smooth(se=FALSE)
+
+plot(BACC_buzz$dist, BACC_buzz$duration)
+plot(BACC_buzz$dist, BACC_buzz$buzz)
+
+hist(BACC_buzz_mlt$value)
+
+fit_buzz <- lm(data = BACC_buzz_mlt, formula = value ~ variable * buzz)
+anova(fit_buzz)
+fit_dist <- lm(data = BACC_buzz_mlt, formula = value ~ variable * distance)
+anova(fit_dist)
+
+
+fit_HMM <- lm(data = BACC_buzz, formula = HMM ~ dist + buzz)
+summary(fit_HMM)
+fit_CVCP <- lm(data = BACC_buzz, formula = CVCP ~ dist + buzz)
+summary(fit_CVCP)
+fit_FPT <- lm(data = BACC_buzz, formula = FPT ~ dist + buzz)
+summary(fit_FPT)
+fit_EMbC <- lm(data = BACC_buzz, formula = EMbC ~ dist + buzz)
+summary(fit_EMbC)
+fit_kmC <- lm(data = BACC_buzz, formula = kmC ~ dist + buzz)
+summary(fit_kmC)
+
+# plot(fit)
+BACC_buzz_mlt <- melt(BACC_buzz[,1:6], by = bat)
+```
+
+```{r}
+library(ggpubr)
+
+N = length(bats)
+
+sum_TNR <- data.frame(met = rep("buzz", 5), var = c("kmC", "FPT", "HMM", "EMbC", "CVCP"), N = N, mean = NA, sd = NA, se = NA)
+
+sum_TNR$mean[1] <- mean(TNR_buzz$kmC)
+sum_TNR$sd[1] <- sd(TNR_buzz$kmC)
+sum_TNR$se[1] <- sd(TNR_buzz$kmC)/sqrt(N)
+
+sum_TNR$mean[2] <- mean(TNR_buzz$FPT)
+sum_TNR$sd[2] <- sd(TNR_buzz$FPT)
+sum_TNR$se[2] <- sd(TNR_buzz$FPT)/sqrt(N)
+
+sum_TNR$mean[3] <- mean(TNR_buzz$HMM)
+sum_TNR$sd[3] <- sd(TNR_buzz$HMM)
+sum_TNR$se[3] <- sd(TNR_buzz$HMM)/sqrt(N)
+
+sum_TNR$mean[4] <- mean(TNR_buzz$EMbC)
+sum_TNR$sd[4] <- sd(TNR_buzz$EMbC)
+sum_TNR$se[4] <- sd(TNR_buzz$EMbC)/sqrt(N)
+
+sum_TNR$mean[5] <- mean(TNR_buzz$CVCP)
+sum_TNR$sd[5] <- sd(TNR_buzz$CVCP)
+sum_TNR$se[5] <- sd(TNR_buzz$CVCP)/sqrt(N)
+
+
+alpha=0.05
+t=qt((1-alpha)/2 + .5, length(bat)-1)   # tend to 1.96 if sample size is big enough
+
+sum_TNR$CI <- t*sum_TNR$se
+
+sum_TPR <- data.frame(met = rep("buzz", 5), var = c("kmC", "FPT", "HMM", "EMbC", "CVCP"), N = N, mean = NA, sd = NA, se = NA)
+
+sum_TPR$mean[1] <- mean(TPR_buzz$kmC)
+sum_TPR$sd[1] <- sd(TPR_buzz$kmC)
+sum_TPR$se[1] <- sd(TPR_buzz$kmC)/sqrt(N)
+
+sum_TPR$mean[2] <- mean(TPR_buzz$FPT)
+sum_TPR$sd[2] <- sd(TPR_buzz$FPT)
+sum_TPR$se[2] <- sd(TPR_buzz$FPT)/sqrt(N)
+
+sum_TPR$mean[3] <- mean(TPR_buzz$HMM)
+sum_TPR$sd[3] <- sd(TPR_buzz$HMM)
+sum_TPR$se[3] <- sd(TPR_buzz$HMM)/sqrt(N)
+
+sum_TPR$mean[4] <- mean(TPR_buzz$EMbC)
+sum_TPR$sd[4] <- sd(TPR_buzz$EMbC)
+sum_TPR$se[4] <- sd(TPR_buzz$EMbC)/sqrt(N)
+
+sum_TPR$mean[5] <- mean(TPR_buzz$CVCP)
+sum_TPR$sd[5] <- sd(TPR_buzz$CVCP)
+sum_TPR$se[5] <- sd(TPR_buzz$CVCP)/sqrt(N)
+
+alpha=0.05
+t=qt((1-alpha)/2 + .5, length(bat)-1)   # tend to 1.96 if sample size is big enough
+
+sum_TPR$CI <- t*sum_TPR$se
+
+sum_BACC <- data.frame(met = rep("buzz", 5), var = c("kmC", "FPT", "HMM", "EMbC", "CVCP"), N = N, mean = NA, sd = NA, se = NA)
+
+sum_BACC$mean[1] <- mean(BACC_buzz$kmC)
+sum_BACC$sd[1] <- sd(BACC_buzz$kmC)
+sum_BACC$se[1] <- sd(BACC_buzz$kmC)/sqrt(N)
+
+sum_BACC$mean[2] <- mean(BACC_buzz$FPT)
+sum_BACC$sd[2] <- sd(BACC_buzz$FPT)
+sum_BACC$se[2] <- sd(BACC_buzz$FPT)/sqrt(N)
+
+sum_BACC$mean[3] <- mean(BACC_buzz$HMM)
+sum_BACC$sd[3] <- sd(BACC_buzz$HMM)
+sum_BACC$se[3] <- sd(BACC_buzz$HMM)/sqrt(N)
+
+sum_BACC$mean[4] <- mean(BACC_buzz$EMbC)
+sum_BACC$sd[4] <- sd(BACC_buzz$EMbC)
+sum_BACC$se[4] <- sd(BACC_buzz$EMbC)/sqrt(N)
+
+sum_BACC$mean[5] <- mean(BACC_buzz$CVCP)
+sum_BACC$sd[5] <- sd(BACC_buzz$CVCP)
+sum_BACC$se[5] <- sd(BACC_buzz$CVCP)/sqrt(N)
+
+alpha=0.05
+t=qt((1-alpha)/2 + .5, length(bat)-1)   # tend to 1.96 if sample size is big enough
+
+sum_BACC$CI <- t*sum_BACC$se
+
+alpha=0.05
+t=qt((1-alpha)/2 + .5, length(bat)-1)   # tend to 1.96 if sample size is big enough
+
+# search_melt <- melt(search)
+# summarySE(search_melt)
+
+sum_TNR$measure <- "TNR"
+sum_TPR$measure <- "TPR"
+sum_BACC$measure <- "BACC"
+
+
+TNR <- ggplot(sum_TNR, aes(x = factor(var, levels = c("kmC", "FPT", "HMM", "EMbC", "CVCP")), y = 100*mean, fill = var))+ geom_bar(position = position_dodge(), stat = "identity") +
+  geom_errorbar(aes(ymin=100*(mean-se), ymax = 100*(mean+se)), width = .2, position = position_dodge(0.9)) + ylim(c(0,100)) + guides(fill = FALSE) + ylab("True Positive Rate (%)") + xlab("") + theme_bw() 
+# 
+TPR <- ggplot(sum_TPR, aes(x = factor(var, levels = c("kmC", "FPT", "HMM", "EMbC", "CVCP")), y = 100*mean, fill = var))+ geom_bar(position = position_dodge(), stat = "identity") +
+  geom_errorbar(aes(ymin=100*(mean-se), ymax = 100*(mean+se)), width = .2, position = position_dodge(0.9)) + ylim(c(0,100)) + guides(fill = FALSE) + ylab("True Positive Rate (%)") + xlab("") + theme_bw() 
+
+friedman.test(value ~ variable | bat, data = BACC_buzz_mlt)
+```
+
+
+### Figure 4
+#### prep TNR TPR data
+```{r}
+
+
+TPR_buzz_mlt <- melt(TPR_buzz)
+TNR_buzz_mlt <- melt(TNR_buzz)
+
+TPR_TNR <- TPR_buzz_mlt
+TPR_TNR$value2 <- TNR_buzz_mlt$value
+TPR_TNR$value <- TPR_TNR$value
+TPR_TNR$variable <- as.character(TPR_TNR$variable)
+TPR_TNR$variable[TPR_TNR$variable == "CVCP"] <- "CVCP"
+TPR_TNR$variable <- factor(TPR_TNR$variable, levels = c("kmC", "FPT", "HMM", "EMbC", "CVCP"))
+
+TPR_TNR_sum <- plyr::join(sum_TPR, sum_TNR, by = c("var", "met", "N"))
+names(TPR_TNR_sum) <- c("met", "var", "N", "mean_TPR", "sd_TPR", "se_TPR", "CI_TPR", "measure", "mean_TNR", "sd_TNR", "se_TNR", "CI_TNR", "measure")
+TPR_TNR_sum <- TPR_TNR_sum[,c(2:7,9:12)]
+TPR_TNR_sum$var <- c("kmC", "FPT", "HMM", "EMbC", "CVCP")
+TPR_TNR_sum$var <- factor(TPR_TNR_sum$var, levels = c("kmC", "FPT", "HMM", "EMbC", "CVCP"))
+```
+#### plot TPR TNR
+```{r}
+TPR_TNR_plot <- 
+  ggplot(TPR_TNR_sum, aes(mean_TPR, mean_TNR, col = factor(var, levels = c("kmC", "FPT", "HMM", "EMbC", "CVCP")))) + 
+    xlab("True Positive Rate") + ylab("True Negative Rate") +
+    geom_abline(intercept = 1, slope = -1, linetype = "dashed") +
+    geom_errorbarh(aes(xmax = mean_TPR + se_TPR, xmin = mean_TPR - se_TPR), size = 1.2) + 
+    geom_errorbar(aes(ymax = mean_TNR + se_TNR, ymin = mean_TNR - se_TNR), width = .02, size = 1.2) +
+    theme_classic() +xlim(c(0,1))+ylim(c(0,1)) +
+    theme(legend.title = element_blank()) + 
+    geom_point(data = TPR_TNR, aes(x = value, y = value2, col = factor(variable, levels = c("kmC", "FPT", "HMM", "EMbC", "CVCP"))), alpha = .8) +
+    theme(text = element_text(size=13)) + theme(legend.position="top") + scale_color_discrete(l = 50) +
+    geom_point(shape = 21, fill = "white", size = 3)
+TPR_TNR_plot
+```
+
+#### prep BACC
+```{r}
+BACC_buzz_mlt <- melt(BACC_buzz[,1:6], by = bat)
+BACC_buzz_mlt <- BACC_buzz_mlt[!is.na(BACC_buzz_mlt$variable),]
+BACC_buzz_mlt$variable <- factor(BACC_buzz_mlt$variable, levels = c("kmC", "FPT", "HMM", "EMbC", "CVCP"))
+
+friedman.test(value ~ variable | bat, data = BACC_buzz_mlt)
+
+ps <- c(wilcox.test(BACC_buzz$kmC, BACC_buzz$EMbC, paired = TRUE)$p.value, # NS 0.10
+        wilcox.test(BACC_buzz$kmC, BACC_buzz$FPT, paired = TRUE)$p.value, # NS 1
+        wilcox.test(BACC_buzz$kmC, BACC_buzz$HMM, paired = TRUE)$p.value, # p = 0.0006 kmC vs HMM
+        wilcox.test(BACC_buzz$kmC, BACC_buzz$CVCP, paired = TRUE)$p.value, # NS 0.22
+        wilcox.test(BACC_buzz$EMbC, BACC_buzz$FPT, paired = TRUE)$p.value, # NS 1
+        wilcox.test(BACC_buzz$EMbC, BACC_buzz$HMM, paired = TRUE)$p.value, # p = 0.02 EMbC vs HMM
+        wilcox.test(BACC_buzz$EMbC, BACC_buzz$CVCP, paired = TRUE)$p.value, # NS 1
+        wilcox.test(BACC_buzz$FPT, BACC_buzz$HMM, paired = TRUE)$p.value, # NS 1
+        wilcox.test(BACC_buzz$FPT, BACC_buzz$CVCP, paired = TRUE)$p.value, # NS 1
+        wilcox.test(BACC_buzz$CVCP, BACC_buzz$HMM, paired = TRUE)$p.value) # NS p = 0.15
+p.adjust(p = ps, n = length(ps), method = "bonferroni")
+# kmC and HMM
+# EMbC and HMM
+# BACC_boxplot_letters
+```
+
+#### plot BACC
+```{r}
+BACC_boxplot_letters <- {}
+letter_sizes <- 6
+BACC_boxplot_letters <- ggplot(data = BACC_buzz_mlt) + 
+                              geom_boxplot(aes(x =variable,
+                                                         y = value, col = variable)) + theme_classic() +
+                              guides(col = FALSE) + scale_color_discrete(l = 50) +
+                              ylab("Balanced Accuracy: \n (True Positive Rate +True Negative Rate)/2") + 
+                              xlab("") + ylim(0.4, 1.1) + 
+                              geom_abline(intercept = .5, slope = 0, linetype = "dashed") +
+                              geom_text(aes(x=variable,y=1,
+                              label=c(rep("a", 15), rep("a b", 15), rep("b", 15), 
+                                      rep("a", 15), rep("a b", 15))), size = letter_sizes)
+BACC_boxplot_letters
+
+
+
+```
+
+```{r}
+
+png(filename = "/Users/edwar/Dropbox/Vivesi2018/Documents/Segmentation/MovementEcology/Revisions/VSeg_Fig4_boxplot_letters.png", width = 800, height = 600)
+sizes <- 22
+ggpubr::ggarrange(TPR_TNR_plot+theme(text = element_text(size=sizes)), BACC_boxplot_letters+theme(text = element_text(size=sizes))+theme(axis.text.x = element_text(angle = 30, hjust = 1, size = sizes)), ncol = 2, nrow = 1, labels = c("A", "B"), align = "h")
+
+dev.off()
+
+```
+
+# % of search and commute
+```{r}
+layout(1)
+# Search
+barplot(100*c(length(which(Final$kmC==1))/length(na.omit(Final$kmC)),
+              length(which(Final$FPT01==1))/length(na.omit(Final$FPT01)),
+              length(which(Final$HMM01==1))/length(na.omit(Final$HMM01)),
+              length(which(Final$embc01==1))/length(na.omit(Final$embc01)),
+              length(which(Final$CVCP01==1))/length(na.omit(Final$CVCP01))),             
+              names = c("k-means", "EMbC", "FPT", "HMM", "CVCP"), 
+              col = c(rgb(0,0,0,.6), rgb(0,0,0,.5), rgb(0,0,0,.4), rgb(0,0,0,.2), rgb(0,0,0,.1)), 
+              ylab = "% of locations searching", ylim = c(0,100))
+
+
+```
+## by bat
+### boxplot
+```{r}
+bats <- unique(Final$bat_flight)
+search <- data.frame(bat = bats, buzz = NA, kmC = NA, FPT = NA, HMM = NA, EMbC = NA, CVCP = NA)
+
+for(i in 1:length(bats)){
+  bat <- Final[Final$bat_flight== bats[i],]
+  
+  # search$Bat[i] <- bats[i]
+  # search$buzz[i] <- length(which(bat$buzz01==1))/length(na.omit(bat$buzz01))
+  search$kmC[i] <- length(which(bat$kmC==1))/length(na.omit(bat$kmC))
+  search$FPT[i] <- length(which(bat$FPT01==1))/length(na.omit(bat$FPT01))
+  search$HMM[i] <- length(which(bat$HMM01==1))/length(na.omit(bat$HMM01))
+  search$EMbC[i] <- length(which(bat$embc01==1))/length(na.omit(bat$embc01))
+  search$CVCP[i] <- length(which(bat$CVCP01==1))/length(na.omit(bat$CVCP01))
+}
+
+search_mlt <- melt(search)
+search_mlt <- search_mlt[search_mlt$variable != "Buzz",]
+search_mlt$variable <- factor(search_mlt$variable)
+
+friedman.test(value ~ variable | bat, data = search_mlt)
+
+wilcox.test(search$HMM, search$FPT, paired = TRUE)
+wilcox.test(search$HMM, search$CVCP, paired = TRUE)
+wilcox.test(search$HMM, search$EMbC, paired = TRUE)
+wilcox.test(search$HMM, search$kmC, paired = TRUE)
+
+
+search_boxplot_letters <- ggplot(search_mlt[search_mlt$variable != "Buzz",], aes(factor(variable, levels = c("kmC", "FPT", "HMM", "EMbC", "CVCP")), 100*value)) +
+  geom_boxplot(width=0.5, size=1, fatten=1, aes(col=variable)) + guides(col = FALSE) +
+  theme_classic()+xlab("")+ylab("% of track foraging") + ylim(0,100)+  
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))+
+  scale_color_discrete(l = 50) +
+  geom_text(aes(x=variable,y=100,                  
+                label=c(rep("a", 15), rep("b", 15), rep("b d", 15), 
+                        rep("c", 15), rep("d", 15))), size = letter_sizes)
+
+search_boxplot_letters
+temp <- wilcox.test(search$kmC, search$EMbC, paired = TRUE)
+temp$p.value
+ps <- c(wilcox.test(search$kmC, search$EMbC, paired = TRUE)$p.value, # p = 0.0006
+        wilcox.test(search$kmC, search$FPT, paired = TRUE)$p.value, # p = 0.0006
+        wilcox.test(search$kmC, search$HMM, paired = TRUE)$p.value, # p = 0.0006
+        wilcox.test(search$kmC, search$CVCP, paired = TRUE)$p.value, # p = 0.0006
+        wilcox.test(search$EMbC, search$FPT, paired = TRUE)$p.value, # p = 0.0006
+        wilcox.test(search$EMbC, search$HMM, paired = TRUE)$p.value, # p = 0.0006
+        wilcox.test(search$EMbC, search$CVCP, paired = TRUE)$p.value, # p = 0.002
+        wilcox.test(search$FPT, search$HMM, paired = TRUE)$p.value, # NS p = 0.8
+        wilcox.test(search$FPT, search$CVCP, paired = TRUE)$p.value, # NS p = 0.35
+        wilcox.test(search$CVCP, search$HMM, paired = TRUE)$p.value) # NS p = 1
+p.adjust(p = ps, n = length(ps), method = "bonferroni")
+
+search$kmC %>% mean
+search$FPT %>% mean
+search$HMM %>% mean
+search$EMbC %>% mean
+search$CVCP %>% mean
+```
+
+# Speed and turn angle
+
+
+## buzz
+```{r}
+layout(cbind(1,2))
+
+barplot(c(mean(Final$speed[Final$buzz01==1], na.rm = TRUE),
+        mean(Final$speed[Final$buzz01==0], na.rm = TRUE)),
+        names = c("Buzz", "No Buzz"), col = c("darkgray", "lightgray"), ylab = "speed (m/s)")
+
+barplot(c(180/pi*mean(abs(Final$rel.angle[Final$buzz01==1]), na.rm = TRUE),
+        180/pi*abs(mean(Final$rel.angle[Final$buzz01==0], na.rm = TRUE))),
+        names = c("Buzz", "No Buzz"), col = c("darkgray", "lightgray"), 
+        ylab = expression(paste("abs(relative turn angle) ( ",degree,")")))
+
+mean(Final$speed[Final$buzz01==1], na.rm = TRUE)
+sd(Final$speed[Final$buzz01==1], na.rm = TRUE)
+
+mean(abs(Final$rel.angle[Final$buzz01==1]*180/pi), na.rm = TRUE)
+sd(abs(Final$rel.angle[Final$buzz01==1]*180/pi), na.rm = TRUE)
+
+```
+
+
+## by bat
+### boxplot
+```{r}
+
+bats <- unique(Final$bat_flight)
+
+fspeed <- data.frame(bat = bats, kmC = NA, EMbC = NA, FPT = NA, HMM = NA, CVCP = NA, buzz = NA)
+fturn <- data.frame(bat = bats, kmC = NA, EMbC = NA, FPT = NA, HMM = NA, CVCP = NA, buzz = NA)
+cspeed <- data.frame(bat = bats, kmC = NA, EMbC = NA, FPT = NA, HMM = NA, CVCP = NA, buzz = NA)
+cturn <- data.frame(bat = bats, kmC = NA, EMbC = NA, FPT = NA, HMM = NA, CVCP = NA, buzz = NA)
+
+i = 1
+for(i in 1:length(bats)){
+  bat <- Final[Final$bat_flight == bats[i],]
+  
+  fspeed$buzz[i] <- mean(bat$speed[bat$buzz01 == 1], na.rm = TRUE)
+  fspeed$kmC[i] <- mean(bat$speed[bat$kmC == 1], na.rm = TRUE)
+  fspeed$EMbC[i] <- mean(bat$speed[bat$embc01 == 1], na.rm = TRUE)
+  fspeed$FPT[i] <- mean(bat$speed[bat$FPT01 == 1], na.rm = TRUE)
+  fspeed$HMM[i] <- mean(bat$speed[bat$HMM01 == 1], na.rm = TRUE)
+  fspeed$CVCP[i] <- mean(bat$speed[bat$CVCP01 == 1], na.rm = TRUE)
+  
+  cspeed$buzz[i] <- mean(bat$speed[bat$buzz01 == 0], na.rm = TRUE)
+  cspeed$kmC[i] <- mean(bat$speed[bat$kmC == 0], na.rm = TRUE)
+  cspeed$EMbC[i] <- mean(bat$speed[bat$embc01 == 0], na.rm = TRUE)
+  cspeed$FPT[i] <- mean(bat$speed[bat$FPT01 == 0], na.rm = TRUE)
+  cspeed$HMM[i] <- mean(bat$speed[bat$HMM01 == 0], na.rm = TRUE)
+  cspeed$CVCP[i] <- mean(bat$speed[bat$CVCP01 == 0], na.rm = TRUE)
+  
+  fturn$buzz[i] <- mean(abs(bat$rel.angle[bat$buzz01 == 1]) * 180/pi, na.rm = TRUE)
+  fturn$kmC[i] <- mean(abs(bat$rel.angle[bat$kmC == 1]) * 180/pi, na.rm = TRUE)
+  fturn$EMbC[i] <- mean(abs(bat$rel.angle[bat$embc01 == 1]) * 180/pi, na.rm = TRUE)
+  fturn$FPT[i] <- mean(abs(bat$rel.angle[bat$FPT01 == 1]) * 180/pi, na.rm = TRUE)
+  fturn$HMM[i] <- mean(abs(bat$rel.angle[bat$HMM01 == 1]) * 180/pi, na.rm = TRUE)
+  fturn$CVCP[i] <- mean(abs(bat$rel.angle[bat$CVCP01 == 1]) * 180/pi, na.rm = TRUE)
+  
+  cturn$buzz[i] <- mean(abs(bat$rel.angle[bat$buzz == 0]) * 180/pi, na.rm = TRUE)
+  cturn$kmC[i] <- mean(abs(bat$rel.angle[bat$kmC == 0]) * 180/pi, na.rm = TRUE)
+  cturn$EMbC[i] <- mean(abs(bat$rel.angle[bat$embc01 == 0]) * 180/pi, na.rm = TRUE)
+  cturn$FPT[i] <- mean(abs(bat$rel.angle[bat$FPT01 == 0]) * 180/pi, na.rm = TRUE)
+  cturn$HMM[i] <- mean(abs(bat$rel.angle[bat$HMM01 == 0]) * 180/pi, na.rm = TRUE)
+  cturn$CVCP[i] <- mean(abs(bat$rel.angle[bat$CVCP01 == 0]) * 180/pi, na.rm = TRUE)
+}
+
+fspeed$behavior <- "search"
+cspeed$behavior <- "commuting"
+fturn$behavior <- "search"
+cturn$behavior <- "commuting"
+
+fspeed$metric <- "speed"
+cspeed$metric <- "speed"
+fturn$metric <- "turn angle"
+cturn$metric <- "turn angle"
+
+speeds <- rbind(fspeed, cspeed)
+turns <- rbind(fturn, cturn)
+
+quantile(fspeed$kmC)
+
+speed_mlt <- melt(speeds)
+turn_mlt <- melt(turns)
+
+```
+
+### Summary stats for speed and angle
+```{r}
+
+# foraging mean & sd
+## speed
+print("kmC, FPT, HMM, EMbC, CVCP")
+print("foraging speed mean")
+c(fspeed$kmC %>% mean,
+  fspeed$FPT %>% mean,
+  fspeed$HMM %>% mean,
+  fspeed$EMbC %>% mean,
+  fspeed$CVCP %>% mean,
+  fspeed$buzz %>% mean)
+
+print("foraging speed sd")
+c(fspeed$kmC %>% sd,
+  fspeed$FPT %>% sd,
+  fspeed$HMM %>% sd,
+  fspeed$EMbC %>% sd,
+  fspeed$CVCP %>% sd,
+  fspeed$buzz %>% sd)
+
+## turn angle
+print("kmC, FPT, HMM, EMbC, CVCP")
+print("foraging turn mean")
+c(fturn$kmC %>% mean,
+  fturn$FPT %>% mean,
+  fturn$HMM %>% mean,
+  fturn$EMbC %>% mean,
+  fturn$CVCP %>% mean,
+  fturn$buzz %>% mean)
+
+print("foraging turn sd")
+c(fturn$kmC %>% sd,
+  fturn$FPT %>% sd,
+  fturn$HMM %>% sd,
+  fturn$EMbC %>% sd,
+  fturn$CVCP %>% sd,
+  fturn$buzz %>% sd)
+
+ps <- c(wilcox.test(fspeed$buzz, fspeed$kmC, paired = TRUE)$p.value,  # p = 0.004 kmC
+        wilcox.test(fspeed$buzz, fspeed$EMbC, paired = TRUE)$p.value, # NS p = 0.4
+        wilcox.test(fspeed$buzz, fspeed$FPT, paired = TRUE)$p.value,  # NS p = 1
+        wilcox.test(fspeed$buzz, fspeed$HMM, paired = TRUE)$p.value,  # NS p = 0.24
+        wilcox.test(fspeed$buzz, fspeed$CVCP, paired = TRUE)$p.value) # NS p = 1
+
+p.adjust(p = ps, method = "bonferroni", n = 5)
+
+ps <- c(wilcox.test(fturn$buzz, fturn$kmC, paired = TRUE)$p.value,  # p = 0.0003 kmC
+        wilcox.test(fturn$buzz, fturn$EMbC, paired = TRUE)$p.value, # p = 0.0003 EMbC
+        wilcox.test(fturn$buzz, fturn$FPT, paired = TRUE)$p.value,  # NS p = 1
+        wilcox.test(fturn$buzz, fturn$HMM, paired = TRUE)$p.value,  # p = 0.09 HMM
+        wilcox.test(fturn$buzz, fturn$CVCP, paired = TRUE)$p.value) # NS p = 1
+
+p.adjust(p = ps, method = "bonferroni", n = 5)
+
+fturn_mlt <- melt(fturn)
+ggplot(fturn_mlt, aes(x = variable, y = value))+geom_boxplot()
+```
+
+```{r}
+# commute mean & sd
+## speed
+
+cspeed$kmC %>% mean
+cspeed$FPT %>% mean
+cspeed$HMM %>% mean
+cspeed$EMbC %>% mean
+cspeed$CVCP %>% mean
+
+cspeed$kmC %>% sd
+cspeed$FPT %>% sd
+cspeed$HMM %>% sd
+cspeed$EMbC %>% sd
+cspeed$CVCP %>% sd
+
+## turn angle
+cturn$kmC %>% mean
+cturn$FPT %>% mean
+cturn$HMM %>% mean
+cturn$EMbC %>% mean
+cturn$CVCP %>% mean
+
+cturn$kmC %>% sd
+cturn$FPT %>% sd
+cturn$HMM %>% sd
+cturn$EMbC %>% sd
+cturn$CVCP %>% sd
+
+
+speed_plot <- ggplot(speed_mlt, aes(x = variable, y = value))+geom_boxplot()+geom_jitter(aes(col = bat))+facet_wrap(~behavior) + theme_classic() + ylab("speed (m/s)")
+
+turn_plot <- ggplot(turn_mlt, aes(x = variable, y = value))+geom_boxplot()+geom_jitter(aes(col = bat))+facet_wrap(~behavior) + theme_classic() + ylab(expression(paste("abs(relative turn angle) (",degree,")")))
+
+multiplot(speed_plot, turn_plot, layout = rbind(1,2))
+
+Final$kmC %>% is.na %>% as.numeric %>% sum
+Final$FPT %>% is.na %>% as.numeric %>% sum
+Final$HMM %>% is.na %>% as.numeric %>% sum
+Final$embc %>% is.na %>% as.numeric %>% sum
+Final$CVCP %>% is.na %>% as.numeric %>% sum
+
+```
+
+
+
+
+# Chains of movement  
+## FPT
+```{r}
+library(caret)
+Chain <- {}
+bats <-  unique(Final$bat_flight)
+i = 1
+for(i in 1:length(bats)){
+  idx <- Final$bat_flight == bats[i]
+  bat <-  Final[idx,]
+  temp <- rle(bat$FPT01)
+  Chain$value <- c(Chain$value, temp$values)
+  Chain$length <- c(Chain$length, temp$lengths)
+  Chain$bat <- c(Chain$bat, rep(bats[i], length(temp$values)))
+  loc <- 1
+  j <- 1
+  for(j in 1:length(temp$values)){
+    loc <- loc + temp$lengths[j]
+    Chain$buzz <- c(Chain$buzz, sum(as.numeric(bat$buzz[(loc-temp$lengths[j]):(loc-1)] == 1)))
+    Chain$buzz01 <- c(Chain$buzz01, as.numeric(any(bat$buzz01[(loc-temp$lengths[j]):(loc-1)] == 1)))
+      }
+}
+
+str(Chain)
+chain_bat <- as.factor(Chain$bat)
+# levels(chain_bat) <- levels(bats)
+FPT_Chain <- na.omit(data.frame(value = Chain$value, length = Chain$length, bat = chain_bat, buzz = Chain$buzz, buzz01 = Chain$buzz01))
+
+
+FPT_Chain_mat_buzz <- confusionMatrix(table(FPT_Chain$value, FPT_Chain$buzz01, dnn = c("FPT", "buzz")))
+```
+
+## EMbC
+```{r}
+Chain <- {}
+bats <-  unique(Final$bat_flight)
+i = 1
+for(i in 1:length(bats)){
+  idx <- Final$bat_flight == bats[i]
+  bat <-  Final[idx,]
+  temp <- rle(bat$embc01)
+  Chain$value <- c(Chain$value, temp$values)
+  Chain$length <- c(Chain$length, temp$lengths)
+  Chain$bat <- c(Chain$bat, rep(bats[i], length(temp$values)))
+  loc <- 1
+  j <- 1
+  for(j in 1:length(temp$values)){
+    loc <- loc + temp$lengths[j]
+    Chain$buzz <- c(Chain$buzz, sum(as.numeric(bat$buzz[(loc-temp$lengths[j]):(loc-1)] == 1)))
+    Chain$buzz01 <- c(Chain$buzz01, as.numeric(any(bat$buzz01[(loc-temp$lengths[j]):(loc-1)] == 1)))
+  }
+}
+
+str(Chain)
+chain_bat <- as.factor(Chain$bat)
+# levels(chain_bat) <- levels(bats)
+embc_Chain <- na.omit(data.frame(value = Chain$value, length = Chain$length, bat = chain_bat, buzz = Chain$buzz, buzz01 = Chain$buzz01))
+
+
+embc_Chain_mat_buzz <- confusionMatrix(table(embc_Chain$value, embc_Chain$buzz01, dnn = c("embc", "buzz")))
+```
+
+## HMM
+```{r}
+Chain <- {}
+bats <-  unique(Final$bat_flight)
+i = 1
+for(i in 1:length(bats)){
+  idx <- Final$bat_flight == bats[i]
+  bat <-  Final[idx,]
+  temp <- rle(bat$HMM01)
+  Chain$value <- c(Chain$value, temp$values)
+  Chain$length <- c(Chain$length, temp$lengths)
+  Chain$bat <- c(Chain$bat, rep(bats[i], length(temp$values)))
+  loc <- 1
+  j <- 1
+  for(j in 1:length(temp$values)){
+    loc <- loc + temp$lengths[j]
+    Chain$buzz <- c(Chain$buzz, sum(as.numeric(bat$buzz[(loc-temp$lengths[j]):(loc-1)] == 1)))
+    Chain$buzz01 <- c(Chain$buzz01, as.numeric(any(bat$buzz01[(loc-temp$lengths[j]):(loc-1)] == 1)))
+  }
+}
+
+str(Chain)
+chain_bat <- as.factor(Chain$bat)
+# levels(chain_bat) <- levels(bats)
+HMM_Chain <- na.omit(data.frame(value = Chain$value, length = Chain$length, bat = chain_bat, buzz = Chain$buzz, buzz01 = Chain$buzz01))
+
+HMM_Chain_mat_buzz <- confusionMatrix(table(HMM_Chain$value, HMM_Chain$buzz01, dnn = c("HMM", "buzz")))
+```
+
+## CVCP
+```{r}
+Chain <- {}
+bats <-  unique(Final$bat_flight)
+i = 1
+for(i in 1:length(bats)){
+  idx <- Final$bat_flight == bats[i]
+  bat <-  Final[idx,]
+  temp <- rle(bat$CVCP01)
+  Chain$value <- c(Chain$value, temp$values)
+  Chain$length <- c(Chain$length, temp$lengths)
+  Chain$bat <- c(Chain$bat, rep(bats[i], length(temp$values)))
+  loc <- 1
+  j <- 1
+  for(j in 1:length(temp$values)){
+    loc <- loc + temp$lengths[j]
+    Chain$buzz <- c(Chain$buzz, sum(as.numeric(bat$buzz[(loc-temp$lengths[j]):(loc-1)] == 1)))
+    Chain$buzz01 <- c(Chain$buzz01, as.numeric(any(bat$buzz01[(loc-temp$lengths[j]):(loc-1)] == 1)))
+  }
+}
+
+str(Chain)
+chain_bat <- as.factor(Chain$bat)
+# levels(chain_bat) <- levels(bats)
+CVCP_Chain <- na.omit(data.frame(value = Chain$value, length = Chain$length, bat = chain_bat, buzz = Chain$buzz, buzz01 = Chain$buzz01))
+
+CVCP_Chain_mat_buzz <- confusionMatrix(table(CVCP_Chain$value, CVCP_Chain$buzz01, dnn = c("CVCP", "buzz")))
+```
+
+## kmC
+```{r}
+Chain <- {}
+bats <-  unique(Final$bat_flight)
+i = 1
+for(i in 1:length(bats)){
+  idx <- Final$bat_flight == bats[i]
+  bat <-  Final[idx,]
+  temp <- rle(bat$kmC)
+  Chain$value <- c(Chain$value, temp$values)
+  Chain$length <- c(Chain$length, temp$lengths)
+  Chain$bat <- c(Chain$bat, rep(bats[i], length(temp$values)))
+  loc <- 1
+  j <- 1
+  for(j in 1:length(temp$values)){
+    loc <- loc + temp$lengths[j]
+    Chain$buzz <- c(Chain$buzz, sum(as.numeric(bat$buzz[(loc-temp$lengths[j]):(loc-1)] == 1)))
+    Chain$buzz01 <- c(Chain$buzz01, as.numeric(any(bat$buzz01[(loc-temp$lengths[j]):(loc-1)] == 1)))
+  }
+}
+
+str(Chain)
+chain_bat <- as.factor(Chain$bat)
+# levels(chain_bat) <- levels(bats)
+kmC_Chain <- na.omit(data.frame(value = Chain$value, length = Chain$length, bat = chain_bat, buzz = Chain$buzz, buzz01 = Chain$buzz01))
+
+kmC_Chain_mat_buzz <- confusionMatrix(table(kmC_Chain$value, kmC_Chain$buzz01, dnn = c("kmC", "buzz")))
+```
+
+## Median search chain
+```{r}
+quantile(kmC_Chain$length[kmC_Chain$value == 1])
+quantile(embc_Chain$length[embc_Chain$value == 1])
+quantile(FPT_Chain$length[FPT_Chain$value == 1])
+quantile(HMM_Chain$length[HMM_Chain$value == 1])
+quantile(CVCP_Chain$length[CVCP_Chain$value == 1])
+
+```
+
+
+```{r}
+fchain_mean <- c(mean(embc_Chain$length[embc_Chain$value == 1]), 
+                 mean(FPT_Chain$length[FPT_Chain$value == 1]), 
+                 mean(HMM_Chain$length[HMM_Chain$value == 1]), 
+                 mean(CVCP_Chain$length[CVCP_Chain$value == 1]), 
+                 mean(kmC_Chain$length[kmC_Chain$value == 1]))
+
+cchain_mean <- c(mean(embc_Chain$length[embc_Chain$value == 0]), 
+                 mean(FPT_Chain$length[FPT_Chain$value == 0]), 
+                 mean(HMM_Chain$length[HMM_Chain$value == 0]), 
+                 mean(CVCP_Chain$length[CVCP_Chain$value == 0]), 
+                 mean(kmC_Chain$length[kmC_Chain$value == 0]))
+
+layout(rbind(1:2))
+boxplot(embc_Chain$length[embc_Chain$value == 1], 
+        FPT_Chain$length[FPT_Chain$value == 1], 
+        HMM_Chain$length[HMM_Chain$value == 1], 
+        CVCP_Chain$length[CVCP_Chain$value == 1], 
+        kmC_Chain$length[kmC_Chain$value == 1],  
+        names = c("EMbC", "FPT", "HMM", "CVCP", "kmC"), 
+        ylab = "Search Chain Length", las = 2, ylim = c(0, 900))
+
+boxplot(embc_Chain$length[embc_Chain$value == 0], 
+        FPT_Chain$length[FPT_Chain$value == 0], 
+        HMM_Chain$length[HMM_Chain$value == 0], 
+        CVCP_Chain$length[CVCP_Chain$value == 0], 
+        kmC_Chain$length[kmC_Chain$value == 0],
+        names = c("EMbC", "FPT", "HMM", "CVCP", "kmC"), 
+        ylab = "Commuting Chain Length", las = 2, ylim = c(0, 900))
+
+```
+ 
+# Chain Buzz
+```{r}
+
+TPR_chain_buzz <- c(embc_Chain_mat_buzz$byClass[2], FPT_Chain_mat_buzz$byClass[2],  HMM_Chain_mat_buzz$byClass[2], CVCP_Chain_mat_buzz$byClass[2], kmC_Chain_mat_buzz$byClass[2])
+
+TNR_chain_buzz <- c(embc_Chain_mat_buzz$byClass[1], FPT_Chain_mat_buzz$byClass[1],  HMM_Chain_mat_buzz$byClass[1], CVCP_Chain_mat_buzz$byClass[1], kmC_Chain_mat_buzz$byClass[1])
+
+BA_chain_buzz <- c(embc_Chain_mat_buzz$byClass[11], FPT_Chain_mat_buzz$byClass[11], HMM_Chain_mat_buzz$byClass[11], CVCP_Chain_mat_buzz$byClass[11], kmC_Chain_mat_buzz$byClass[11])
+
+layout(cbind(1,2,3))
+barplot(100*c(
+  TPR_chain_buzz), names = c("EMbC", "FPT", "HMM", "CVCP", "k-means"), ylab = "% buzzes in foraging chains", 
+  ylim = c(0,100), xpd = FALSE, col = 1, las = 2)
+
+barplot(100*c(
+  TNR_chain_buzz), names = c("EMbC", "FPT", "HMM", "CVCP", "k-means"), ylab = "% non-buzzes in commuting chains", 
+  ylim = c(0,100), xpd = FALSE, col = 1, las = 2)
+
+barplot(100*c(
+  BA_chain_buzz), names = c("EMbC", "FPT", "HMM", "CVCP", "k-means"), ylab = "Balanced Accuracy of chains", 
+  ylim = c(0,100), xpd = FALSE, col = 1, las = 2)
+
+```
+
+# Chain lengths by bat
+## boxplot
+```{r}
+
+FPT_Chain$Method = "FPT"
+embc_Chain$Method = "EMbC"
+HMM_Chain$Method = "HMM"
+CVCP_Chain$Method = "CVCP"
+kmC_Chain$Method = "kmC"
+
+Chains <- rbind(kmC_Chain, FPT_Chain, HMM_Chain, embc_Chain, CVCP_Chain)
+bats <- unique(Chains$bat)
+chain_length <- data.frame(bat = bats, kmC = NA, FPT = NA, HMM = NA, EMbC = NA, CVCP = NA) 
+n_chains <- data.frame(bat = bats, kmC = NA, FPT = NA, HMM = NA, EMbC = NA, CVCP = NA)
+
+i = 1
+for(i in 1:length(bats)){
+  bat <- Chains[Chains$bat == bats[i],]
+  chain_length$EMbC[i] <- mean(bat$length[bat$value == 1 & bat$Method == "EMbC"])
+  chain_length$FPT[i] <- mean(bat$length[bat$value == 1 & bat$Method == "FPT"])
+  chain_length$HMM[i] <- mean(bat$length[bat$value == 1 & bat$Method == "HMM"])
+  chain_length$CVCP[i] <- mean(bat$length[bat$value == 1 & bat$Method == "CVCP"])
+  chain_length$kmC[i] <- mean(bat$length[bat$value == 1 & bat$Method == "kmC"])
+  
+  n_chains$EMbC[i] <- length(bat$value[bat$Method == "EMbC"])
+  n_chains$FPT[i] <- length(bat$value[bat$Method == "FPT"])
+  n_chains$HMM[i] <- length(bat$value[bat$Method == "HMM"])
+  n_chains$CVCP[i] <- length(bat$value[bat$Method == "CVCP"])
+  n_chains$kmC[i] <- length(bat$value[bat$Method == "kmC"])
+  
+}
+
+chain_length_mlt <- melt(chain_length)
+chain_length_mlt$variable <- factor(chain_length_mlt$variable)
+
+friedman.test(value ~ variable | bat, data = chain_length_mlt)
+
+
+chain_length_boxplot <- ggplot(chain_length_mlt, 
+                               aes(factor(variable, 
+                                          levels = c("kmC", "FPT", "HMM", "EMbC", "CVCP")), value/4)) +
+  geom_boxplot(width=0.5, size=1, fatten=1, aes(col=variable)) + guides(col = FALSE) +
+  theme_classic()+xlab("")+ylab("mean foraging segment length (min)") +  
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))+
+  scale_color_discrete(l = 50) 
+
+chain_length_boxplot
+
+n_chains_mlt <- melt(n_chains)
+n_chains_mlt$variable <- factor(n_chains_mlt$variable)
+
+friedman.test(value ~ variable | bat, data = n_chains_mlt)
+
+n_chains_boxplot <- ggplot(n_chains_mlt, aes(factor(variable, 
+                                      levels = c("kmC", "FPT", "HMM", "EMbC", "CVCP")), 
+                               value)) +
+  geom_boxplot(width=0.5, size=1, fatten=1, aes(col=variable)) + guides(col = FALSE) +
+  theme_classic()+xlab("")+ylab("# of foraging segments") +  
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  scale_color_discrete(l = 50)
+
+n_chains_boxplot
+
+```
+## Chain length comparison
+```{r}
+chain_length_boxplot_letters <- chain_length_boxplot+
+                    theme(text = element_text(size=15))+
+                    ylab("Mean Foraging Segment Length (min)")+
+                    scale_fill_grey(start = .3, end = .9) + 
+                    geom_text(aes(x=variable,y=30,
+                                  label=c(rep("a", 15), rep("b c", 15), rep("c", 15), 
+                                          rep("d", 15), rep("b", 15))), size = letter_sizes)
+
+chain_length_boxplot_letters
+ps <- c(wilcox.test(chain_length$kmC, chain_length$EMbC, paired = TRUE)$p.value, # p = 0.001
+        wilcox.test(chain_length$kmC, chain_length$FPT, paired = TRUE)$p.value,  # p = 0.0006
+        wilcox.test(chain_length$kmC, chain_length$HMM, paired = TRUE)$p.value,  # p = 0.0006
+        wilcox.test(chain_length$kmC, chain_length$CVCP, paired = TRUE)$p.value, # p = 0.0006
+        wilcox.test(chain_length$EMbC, chain_length$FPT, paired = TRUE)$p.value, # p = 0.0006
+        wilcox.test(chain_length$EMbC, chain_length$HMM, paired = TRUE)$p.value, # p = 0.0006
+        wilcox.test(chain_length$EMbC, chain_length$CVCP, paired = TRUE)$p.value,# p = 0.0006
+        wilcox.test(chain_length$FPT, chain_length$HMM, paired = TRUE)$p.value,  # NS p = 1
+        wilcox.test(chain_length$FPT, chain_length$CVCP, paired = TRUE)$p.value, # NS p = 1
+        wilcox.test(chain_length$CVCP, chain_length$HMM, paired = TRUE)$p.value) # p = 0.004
+p.adjust(p = ps, n = length(ps), method = "bonferroni")
+
+chain_length$kmC %>% mean/4
+chain_length$FPT %>% mean/4
+chain_length$HMM %>% mean/4
+chain_length$EMbC %>% mean/4
+chain_length$CVCP %>% mean/4
+```
+
+```{r}
+n_chains_boxplot_letters <- n_chains_boxplot+
+                    theme(text = element_text(size=15))+
+                    ylab("# of Foraging Segments")+
+                    scale_fill_grey(start = .3, end = .9)+ 
+                    geom_text(aes(x=variable,y=250,
+                                  label=c(rep("a", 15), rep("b c", 15), rep("c", 15), 
+                                          rep("d", 15), rep("b", 15))), size = letter_sizes)
+n_chains_boxplot_letters
+
+ps <- c(wilcox.test(n_chains$kmC, n_chains$EMbC, paired = TRUE)$p.value, # p = 0.02
+        wilcox.test(n_chains$kmC, n_chains$FPT, paired = TRUE)$p.value,  # p = 0.007
+        wilcox.test(n_chains$kmC, n_chains$HMM, paired = TRUE)$p.value,  # p = 0.0006
+        wilcox.test(n_chains$kmC, n_chains$CVCP, paired = TRUE)$p.value, # p = 0.007
+        wilcox.test(n_chains$EMbC, n_chains$FPT, paired = TRUE)$p.value, # p = 0.007
+        wilcox.test(n_chains$EMbC, n_chains$HMM, paired = TRUE)$p.value, # p = 0.007
+        wilcox.test(n_chains$EMbC, n_chains$CVCP, paired = TRUE)$p.value,# p = 0.007
+        wilcox.test(n_chains$FPT, n_chains$HMM, paired = TRUE)$p.value,  # NS p = 1
+        wilcox.test(n_chains$FPT, n_chains$CVCP, paired = TRUE)$p.value, # NS p = 0.09
+        wilcox.test(n_chains$CVCP, n_chains$HMM, paired = TRUE)$p.value) # p = 0.007
+p.adjust(p = ps, n = length(ps), method = "bonferroni")
+
+1.395163e-01
+
+n_chains$kmC %>% mean
+n_chains$FPT %>% mean
+n_chains$HMM %>% mean
+n_chains$EMbC %>% mean
+n_chains$CVCP %>% mean
+```
+
+
+# Fig3 Boxplot
+```{r}
+png(filename = "/Users/edwar/Dropbox/Vivesi2018/Documents/Segmentation/MovementEcology/Revisions/VSeg_Fig3_boxplot_letters.png", height = 600, width = 800)
+ggpubr::ggarrange(search_boxplot_letters+
+                    theme(text = element_text(size=sizes))+
+                    ylab("% Foraging"),
+                  chain_length_boxplot_letters+
+                    theme(text = element_text(size=sizes))+
+                    ylab("Mean Foraging Segment Duration (min)"), 
+                  n_chains_boxplot_letters+
+                    theme(text = element_text(size=sizes))+
+                    ylab("# of Foraging Segments"), 
+                  ncol=3, nrow = 1, labels = c("A", "B", "C"))
+dev.off()
+
+
+```
+
+
+
+# Foraging Area Size
+```{r foraging area size}
+# 
+# bats <- unique(Final$bat_flight)
+# bats_FA <- data.frame()
+# bats_FA_sum <- data.frame()
+# 
+# for(i in 1:length(bats)){
+#   bat <- Final[Final$bat_flight == bats[i],]
+#   
+#   embc_segs <- rle(bat$embc01)
+#   embc_FAs <- {}
+#   for(j in 2:length(embc_segs$lengths)){
+#     try(if(embc_segs$values[j] == 1){
+#       Xs <- diff(range(bat$x[sum(embc_segs$lengths[1:j-1]):sum(embc_segs$lengths[1:j])]))
+#       Ys <- diff(range(bat$y[sum(embc_segs$lengths[1:j-1]):sum(embc_segs$lengths[1:j])]))
+#       embc_FAs <- c(embc_FAs, Xs*Ys)
+#     })
+#   }
+#   
+#   kmc_segs <- rle(bat$kmeans)
+#   kmc_FAs <- {}
+#   for(j in 2:length(kmc_segs$lengths)){
+#     try(if(kmc_segs$values[j] == 1){
+#       Xs <- diff(range(bat$x[sum(kmc_segs$lengths[1:j-1]):sum(kmc_segs$lengths[1:j])]))
+#       Ys <- diff(range(bat$y[sum(kmc_segs$lengths[1:j-1]):sum(kmc_segs$lengths[1:j])]))
+#       kmc_FAs <- c(kmc_FAs, Xs*Ys)
+#     })
+#   }
+#   
+#   fpt_segs <- rle(bat$FPT01)
+#   fpt_FAs <- {}
+#   for(j in 2:length(fpt_segs$lengths)){
+#     try(if(fpt_segs$values[j] == 1){
+#       Xs <- diff(range(bat$x[sum(fpt_segs$lengths[1:j-1]):sum(fpt_segs$lengths[1:j])]))
+#       Ys <- diff(range(bat$y[sum(fpt_segs$lengths[1:j-1]):sum(fpt_segs$lengths[1:j])]))
+#       fpt_FAs <- c(fpt_FAs, Xs*Ys)
+#     })
+#   }
+#   
+#   hmm_segs <- rle(bat$HMM01)
+#   hmm_FAs <- {}
+#   for(j in 2:length(hmm_segs$lengths)){
+#     try(if(hmm_segs$values[j] == 1){
+#       Xs <- diff(range(bat$x[sum(hmm_segs$lengths[1:j-1]):sum(hmm_segs$lengths[1:j])]))
+#       Ys <- diff(range(bat$y[sum(hmm_segs$lengths[1:j-1]):sum(hmm_segs$lengths[1:j])]))
+#       hmm_FAs <- c(hmm_FAs, Xs*Ys)
+#     })
+#   }
+#   
+#   CVCP_segs <- rle(bat$CVCP01)
+#   CVCP_FAs <- {}
+#   for(j in 2:length(CVCP_segs$lengths)){
+#     try(if(CVCP_segs$values[j] == 1){
+#       Xs <- diff(range(bat$x[sum(CVCP_segs$lengths[1:j-1]):sum(CVCP_segs$lengths[1:j])]))
+#       Ys <- diff(range(bat$y[sum(CVCP_segs$lengths[1:j-1]):sum(CVCP_segs$lengths[1:j])]))
+#       CVCP_FAs <- c(CVCP_FAs, Xs*Ys)
+#     })
+#   }
+#   
+#   bat_FAs <- as.data.frame(cbind(kmc = ts(kmc_FAs), embc = ts(embc_FAs), fpt = ts(fpt_FAs), hmm = ts(hmm_FAs), CVCP = ts(CVCP_FAs)))
+#   
+#   bat_mean <- sapply(bat_FAs, mean, na.rm = TRUE)
+#   bat_sd <- sapply(bat_FAs, sd, na.rm = TRUE)
+#   
+#   bat_FAs$bat <- bats[i]
+#   
+#   bats_FA <- rbind(bats_FA, bat_FAs)
+#   bats_FA_sum <- rbind(bats_FA_sum, bat_mean)
+# }
+# 
+# names(bats_FA_sum) <- names(bat_mean)
+# bats_FA_sum$bat <- bats
+# 
+# summary(bats_FA)  
+# bats_FA_mlt <- na.omit(melt(bats_FA))
+# bats_FA_sum_mlt <- na.omit(melt(bats_FA_sum))
+# 
+# mean(bats_FA_sum_mlt$value)/1000^2
+# 
+# ggplot(bats_FA_sum_mlt, aes(x = variable, y = value/1000^2, col = variable))+geom_boxplot() + ylab("foraging area (km^2)") +ylim(c(0,3))+guides(col = FALSE) +xlab("")
+
+```
+
+
+
+## True Positive Rate
+% of buzzes in search chains
+
+```{r}
+
+
+bats <- unique(Final$bat_flight)
+chain_TPR <- data.frame(bat = bats, FPT = NA, EMbC = NA, HMM = NA, CVCP = NA, kmC = NA)
+i = 3
+for(i in 1:length(bats)){
+  bat <- Final[Final$bat_flight== bats[i],]
+  
+  chain_TPR$FPT[i] <- length(which(FPT_Chain$bat == i & FPT_Chain$buzz01 == 1 & FPT_Chain$value == 1))/length(which(FPT_Chain$bat == i & FPT_Chain$buzz01 == 1))
+  chain_TPR$EMbC[i] <- length(which(embc_Chain$bat == i & embc_Chain$buzz01 == 1 & embc_Chain$value == 1))/length(which(embc_Chain$bat == i & embc_Chain$buzz01 == 1))
+  chain_TPR$HMM[i] <- length(which(HMM_Chain$bat == i & HMM_Chain$buzz01 == 1 & HMM_Chain$value == 1))/length(which(HMM_Chain$bat == i & HMM_Chain$buzz01 == 1))
+  chain_TPR$CVCP[i] <- length(which(CVCP_Chain$bat == i & CVCP_Chain$buzz01 == 1 & CVCP_Chain$value == 1))/length(which(CVCP_Chain$bat == i & CVCP_Chain$buzz01 == 1))
+  chain_TPR$kmC[i] <- length(which(kmC_Chain$bat == i & kmC_Chain$buzz01 == 1 & kmC_Chain$value == 1))/length(which(kmC_Chain$bat == i & kmC_Chain$buzz01 == 1))
+}
+
+chain_TPR_mlt <- melt(chain_TPR)
+ggplot(aes(x = variable, y = value, fill = variable), data = chain_TPR_mlt)+geom_boxplot()+guides(fill = FALSE)+theme_classic()
+ 
+ggplot(chain_TPR_mlt, aes(factor(variable, levels = c("EMbC", "FPT", "HMM", "CVCP", "kmC")), 100*value)) +
+  geom_boxplot(width=0.5, size=1.5, fatten=1.5, colour="grey70") +
+  geom_jitter(width = 0.3, aes(col = bat)) + guides(col = FALSE) +
+  # geom_line(aes(group=bat, col = bat), linetype="11") +
+  theme_classic()+xlab("")+ylab("%") + ylim(0,100)
+
+```
+
+## False positive rate 
+% of search chains without buzzes
+```{r}
+
+bats <- unique(Final$bat_flight)
+chain_FPR <- data.frame(bat = bats, FPT = NA, EMbC = NA, HMM = NA, CVCP = NA)
+i = 1
+for(i in 1:length(bats)){
+  bat <- Final[Final$bat_flight== bats[i],]
+  
+  chain_FPR$FPT[i] <- length(which(FPT_Chain$bat == i & FPT_Chain$buzz == 0 & FPT_Chain$value == 1))/length(which(FPT_Chain$bat == i & FPT_Chain$value == 1))
+  chain_FPR$EMbC[i] <- length(which(embc_Chain$bat == i & embc_Chain$buzz == 0 & embc_Chain$value == 1))/length(which(embc_Chain$bat == i & embc_Chain$value == 1))
+  chain_FPR$HMM[i] <- length(which(HMM_Chain$bat == i & HMM_Chain$buzz == 0 & HMM_Chain$value == 1))/length(which(HMM_Chain$bat == i & HMM_Chain$value == 1))
+  chain_FPR$CVCP[i] <- length(which(CVCP_Chain$bat == i & CVCP_Chain$buzz == 0 & CVCP_Chain$value == 1))/length(which(CVCP_Chain$bat == i & CVCP_Chain$value == 1))
+  
+}
+
+chain_FPR_mlt <- melt(chain_FPR)
+ggplot(aes(x = variable, y = value, fill = variable), data = chain_FPR_mlt)+geom_boxplot()+guides(fill = FALSE)+theme_classic()
+ 
+ggplot(chain_FPR_mlt, aes(factor(variable, levels = c("EMbC", "FPT", "HMM", "CVCP")), 100*value)) +
+  geom_boxplot(width=0.5, size=1.5, fatten=1.5, colour="grey70") +
+  geom_jitter(width = 0.3, aes(col = bat)) + guides(col = FALSE) +
+  # geom_line(aes(group=bat, col = bat), linetype="11") +
+  theme_classic()+xlab("")+ylab("%") + ylim(0,100)
+
+```
+
+# time between buzzes
+```{r}
+bats <- unique(Final$bat_flight)
+lengths <- {}
+values <- {}
+Bats_buzzes <- {}
+i = 1
+for(i in 1:length(bats)){
+  bat <- Final[Final$bat_flight == bats[i],]
+  temp <- rle(bat$buzz01)  
+  lengths <- c(lengths, temp$lengths)
+  values <- c(values, temp$values)
+  Bats_buzzes <- c(Bats_buzzes, rep())
+}
+
+buzz_interval <- data.frame(lengths, values)
+temp <- rle(Final$buzz01)
+layout(1)
+hist(buzz_interval$lengths[buzz_interval$values == 0], breaks = 100, main = "", xlab = "GPS points to next buzz")
+
+length(which(buzz_interval$lengths < 2*4 & buzz_interval$values == 0))/length(which(buzz_interval$values == 0))
+
+png(filename = "Time_to_next_buzz.png", width = 800, height = 600)
+a <- hist(log(buzz_interval$lengths[buzz_interval$values == 0]/4), breaks = 50, main = "", xlab = "Minutes to next buzz", xaxt = "n", freq = TRUE) 
+axis <- c(.08,.25,.5,1,2,5,10,20, 40, 100)
+axis(1, at = log(axis), labels = axis)
+dev.off()
+# abline(v = log(.25), lwd=2)
+boxplot(buzz_interval$lengths[buzz_interval$values == 0])
+
+median(buzz_interval$lengths[buzz_interval$values == 0])
+mean(buzz_interval$lengths[buzz_interval$values == 0])
+quantile(buzz_interval$lengths[buzz_interval$values == 0]/4, .8)
+
+prop.table(table(buzz_interval$lengths[buzz_interval$values == 0]/4 < 5))
+```
+
+# time between forgaging segments
+```{r}
+bats <- unique(Final$bat_flight)
+lengths <- {}
+values <- {}
+Bats_segments <- {}
+i = 1
+for(i in 1:length(bats)){
+  bat <- Final[Final$bat_flight == bats[i],]
+  temp <- rle(bat$kmC)  
+  lengths <- c(lengths, temp$lengths)
+  values <- c(values, temp$values)
+  Bats_segments <- c(Bats_segments, rep())
+}
+
+seg_interval <- data.frame(lengths, values)
+temp <- rle(Final$kmC)
+layout(1)
+hist(seg_interval$lengths[seg_interval$values == 0], breaks = 100, main = "", xlab = "GPS points to next foraging segment")
+
+length(which(seg_interval$lengths < 2*4 & seg_interval$values == 0))/length(which(buzz_interval$values == 0))
+
+# png(filename = "Time_to_next_kmC.png", width = 800, height = 600)
+a <- hist(log(buzz_interval$lengths[buzz_interval$values == 0]/4), breaks = 50, main = "", xlab = "Minutes to next foraging segment", xaxt = "n", freq = TRUE) 
+axis <- c(.08,.25,.5,1,2,5,10,20, 40, 100)
+axis(1, at = log(axis), labels = axis)
+# dev.off()
+# abline(v = log(.25), lwd=2)
+# boxplot(seg_interval$lengths[seg_interval$values == 0])
+
+median(seg_interval$lengths[seg_interval$values == 0]/4, na.rm = TRUE)
+mean(seg_interval$lengths[seg_interval$values == 0], na.rm = TRUE)
+quantile(seg_interval$lengths[seg_interval$values == 0]/4, .8, na.rm = TRUE)
+
+prop.table(table(seg_interval$lengths[seg_interval$values == 0]/4 < 5))
+```
+
+# save data
+```{r}
+save(Final, Bats, Viv2015_audio, V, Vint, va.traj, m2_15, m3_15, threshold, HMM_data, hmm_mat, TNR_buzz, BA_buzz, TNR_buzz, TNR_buzz_mlt, TPR_buzz, TPR_buzz_mlt, BACC_buzz, BACC_buzz_mlt, TPR_TNR_plot, BACC_plot, sum_BACC, sum_search, fspeed, fturn, cspeed, cturn, file = "VSeg_Buzz_18.robj")
+
+# 'ACC', 'chain_length', 'chain_length_mlt', 'chain_TPR', 'chain_TPR_mlt', 'n_chains', 'n_chains_mlt'
+
+load("VSeg_Buzz_18.robj")
+```
+
+
+```{r}
+sum(Viv2015_audio$buzz)
+table(Viv2015_audio$buzz)
+
+sum(Final$buzz)
+table(Final$buzz)
+
+```
+
+
+# Buzz rate
+```{r}
+table(Final$buzz01, Final$HMM01, dnn = c("buzz", "HMM"))
+
+162/7703
+438/3735
+
+2/11
+
+sum(Final$buzz)
+```
+
+```{r}
+
+buzz_rate <- data.frame(bat_flight = rep("bat", 10000), FA = NA, 
+                        num_buzz = NA, dur_FA = NA, rate = NA)
+ii = 1
+Final$FA <-NA
+
+bats <- na.omit(unique(Final$bat_flight))
+i=1
+for(i in 1:length(bats)){
+  FA_idx <- rle(Final$HMM01[Final$bat_flight == bats[i]])
+  bat_idx <- which(Final$bat_flight == bats[i])
+  
+  FAs <- which(FA_idx$values == 1)
+  j = 1
+  
+  for(j in 1:length(FAs)){
+    idx <- (sum(FA_idx$lengths[1:(FAs[j]-1)])+1):
+      sum(FA_idx$lengths[1:FAs[j]])
+    
+    Final$FA[bat_idx[idx]] <- j
+    #Final$HMM01[1:idx[length(idx)]]
+    #Final$buzz[1:idx[length(idx)]]
+    
+    buzz_rate$bat_flight[ii] <- bats[i]       
+    buzz_rate$FA[ii] <- j
+    buzz_rate$num_buzz[ii] <- sum(Final$buzz[bat_idx[idx]], na.rm = TRUE)
+    buzz_rate$dur_FA[ii] <- length(idx)
+    buzz_rate$rate[ii] <- buzz_rate$num_buzz[ii]/(buzz_rate$dur_FA[ii]/4)
+    ii <- ii + 1         
+  }
+}
+
+na.omit(buzz_rate)
+sum(buzz_rate$num_buzz, na.rm = TRUE)
+
+
+Final %>% 
+  group_by(bat_flight, FA) %>%
+  summarise_at(vars(buzz), funs(sum(., na.rm=TRUE))) -> bs
+
+bs$buzz %>% sum
+```
+
+```{r}
+boxplot(rate~bat_flight, data = buzz_rate, las = 2)
+
+buzz_rate
+
+write.csv(buzz_rate, file = "buzz_rate.csv")
+
+library(dplyr)
+
+buzz_rate %>%
+  group_by(bat_flight) %>%
+  summarise_at(vars(num_buzz), funs(sum(., na.rm=TRUE)))
+
+buzz_rate %>%
+  group_by(bat_flight) %>%
+  summarise_at(vars(rate), funs(mean(., na.rm=TRUE))) -> buzz_rate_sum
+
+buzz_rate_sum$rate %>% mean(na.rm = TRUE)
+buzz_rate_sum$rate %>% var(na.rm = TRUE)/sqrt(nrow(buzz_rate_sum))
+
+60/1.5
+```
+
+
+# Fig 5: Plot tracks with labels
+```{r}
+library(prettymapr)
+# Viv2015_audio <- read.csv("C:/Users/edwar/Dropbox/Vivesi2015/vivesi_tracks/Movebank/Audio/viv2015audio_tracks.csv")
+
+origin <- c(Viv2015_audio$x[1], Viv2015_audio$y[1])
+
+# setwd("/Users/edwar/Dropbox/Vivesi2018/Documents/Segmentation/MovementEcology/Revisions/")
+## width: 800, height: 862
+
+png(filename = "/Users/edwar/Dropbox/Vivesi2018/Documents/Segmentation/MovementEcology/Revisions/VSeg_Fig5_v6.png", width = 800, height = 900)
+
+bats <- unique(Final$bat_flight)
+i=14
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 50, c = 100)[1:n]
+}
+cols = gg_color_hue(5)
+
+i = 14
+cex.labs <- 3
+cex.axes <- 2
+
+# for(i in 1:length(bats)){
+  bat <- Final[Final$bat_flight == bats[i],]
+  #bat <- bat[180:530,]
+  layout(rbind(c(1,1,2,2), c(1,1,2,2), c(1,1,2,2), c(3,3,4,4), c(5,5,6,6)))
+  par(mai = c(.15,.6,.15,.15), oma=c(4,2,2,0))
+  bat$time <- bat$time - 7*3600
+    
+  # track
+  with(bat, plot(X, Y, type = "l", col = 1, asp = 1, xaxt='n', yaxt='n', ylab = "", xlab = "", ylim = c(min(Y), max(Y)+1000)))
+  #, ann = FALSE, axes = FALSE))
+  with(bat, points(X, Y, cex =1, pch = 16, col = rgb(0,(length(X):1)/length(X),(1:length(X))/length(X),.5)))
+  with(bat, segments(x0 = min(X)- 3100, y0 = min(Y) + 100, x1 = min(X) + 900, y1 = min(Y) + 100))
+  with(bat, text(labels = "4 km", x = min(X)-900, y= min(Y)+600, cex = 1.5))
+  
+  with(bat, points(X[buzz > 0], Y[buzz > 0], col = 2, cex = 2, pch = 16))
+  with(bat, points(origin[1], origin[2], pch = 15, cex = 3))
+  legend("topleft", legend = c("Buzz", "Roost", "Start", "End"), col = c(2, 1, 3, 4), pch = c(16, 15, 16, 16), cex = cex.axes)
+  
+  lines(Islands, col = "darkgray")
+  addnortharrow(pos = "bottomright", scale = 1)
+  mtext("A", side = 3, adj = 0, cex = 1.25)
+  
+  # track zoom
+  # par(mai = c(.1,.1,.1,.1), oma=c(2,0,2,0), new = TRUE)
+  with(bat[150:600,], plot(X, Y, type = "l", col = 1, asp = 1, xaxt='n', yaxt='n', ylab = "", xlab = "", xlim = c(297503.9, 299862.0), ylim = c(3180050, 3182006)))
+  with(bat[150:600,], points(X, Y, cex =1, pch = 16, col = rgb(0,(length(X):1)/length(X),(1:length(X))/length(X),.5)))
+with(bat, points(X[buzz > 0], Y[buzz > 0], col = 2, cex = 2, pch = 16))
+mtext("B", side = 3, adj = 0, cex = 1.2)
+  
+  segments(x0 = 297600, y0 = 3179320, x1 = 298600, y1 = 3179320)
+  with(bat, text(labels = "1 km", x = 298050, y = 3179420, cex = 1.5))
+  addnortharrow(pos = "bottomright", scale = 1)
+
+  # lines(Coast, col = "grey")
+  # lines(Islands, col = "grey")
+
+  # Turn Angle
+  with(bat, plot(time, cosrel.angle, cex.lab = 2, cex.axis = 1.5, type = "n", col = rgb(0,0,0,.5), ylim = c(-2.2, max(na.omit(cosrel.angle))), xlim = c(min(time), max(time)+100), ylab = "Cos(turn angle)", yaxt="n", xaxt = "n", xlab = "")) # [160:560,]
+    axis(2, at=seq(-1,1,.25),labels=seq(-1,1,.25), cex.axis = 1.5)
+    
+  with(bat, points(time, cosrel.angle, cex =.75, type = "o", col = rgb(0,0,0,.5)))
+  
+  with(bat, points(time[kmC == 1], rep(-1.2,length(cosrel.angle[kmC == 1])), col = cols[1]))
+  with(bat, points(time[FPT01 == 1], rep(-1.4,length(cosrel.angle[FPT01 == 1])), col = cols[2]))
+  with(bat, points(time[HMM01 == 1], rep(-1.6,length(cosrel.angle[HMM01 == 1])), col = cols[3]))
+  with(bat, points(time[embc01 == 1], rep(-1.8,length(cosrel.angle[embc01 == 1])), col = cols[4]))
+  with(bat, points(time[CVCP01 == 1], rep(-2,length(cosrel.angle[CVCP01 == 1])), col = cols[5]))
+  
+  with(bat, points(time[buzz > 0], cosrel.angle[buzz > 0], col = 2, cex = 2, pch = 16))
+  legend("bottomleft", legend = c("Buzz", "kmC", "FPT", "HMM", "EMbC", "CVCP"), col = c(2, cols[1], cols[2], cols[3], cols[4], cols[5]), pch = c(16, rep(16, 5)), cex = 1.7)
+  mtext("C", side = 3, adj = 0, cex = 1.25)
+  
+  # Turn Angle zoom
+  # par(mai = c(.1,.1,.1,.1), oma=c(2,0,2,0), new = TRUE)
+  with(bat[200:530,], plot(time, cosrel.angle, cex =.75, type = "n", col = rgb(0,0,0,.5), ylim = c(-2.2, max(na.omit(cosrel.angle))), xlim = c(min(time), max(time)+100), ylab = "", yaxt="n", xaxt = "n", xlab = "")) # [160:560,]
+    #axis(2, at=seq(-1,1,.25),labels=seq(-1,1,.25))
+    
+  with(bat, points(time, cosrel.angle, cex =.75, type = "o", col = rgb(0,0,0,.5)))
+  
+  with(bat, points(time[kmC == 1], rep(-1.2,length(cosrel.angle[kmC == 1])), col = cols[1]))
+  with(bat, points(time[FPT01 == 1], rep(-1.4,length(cosrel.angle[FPT01 == 1])), col = cols[2]))
+  with(bat, points(time[HMM01 == 1], rep(-1.6,length(cosrel.angle[HMM01 == 1])), col = cols[3]))
+  with(bat, points(time[embc01 == 1], rep(-1.8,length(cosrel.angle[embc01 == 1])), col = cols[4]))
+  with(bat, points(time[CVCP01 == 1], rep(-2,length(cosrel.angle[CVCP01 == 1])), col = cols[5]))
+  
+  with(bat, points(time[buzz > 0], cosrel.angle[buzz > 0], col = 2, cex = 2, pch = 16))
+  # legend("bottomleft", legend = c("Buzz", "kmC", "EMbC", "FPT", "HMM", "CVCP"), col = c(2, cols[1], cols[2], cols[3], cols[4], cols[5]), pch = c(16, rep(16, 5)), cex = 1.5)
+  mtext("D", side = 3, adj = 0, cex = 1.25)
+  
+ 
+  # Speed
+  # par(mai = c(.1,.6,.1,.1), oma=c(2,0,2,0), new = TRUE)
+  with(bat, plot(time, speed, cex.lab = cex.labs, cex.axis = cex.axes, type = "n", ylim = c(-6.5, max(na.omit(speed))), xlim = c(min(time), max(time)+100), ylab = "Speed (m/s)", xlab = "", yaxt="n", col = rgb(0,0,0,.5))) # [160:560,]
+  axis(2, at=0:max(na.omit(bat$speed)),labels=0:max(na.omit(bat$speed)), cex.axis = 1.5)
+  mtext("Time (UTC-7)", side = 1, cex = 1.25, outer=FALSE, line = 3)
+
+   
+  with(bat, points(time, speed, cex = .75, type = "o", col = rgb(0,0,0,.5)))
+  with(bat, points(time[kmC == 1], rep(-2,length(speed[kmC == 1])), col = cols[1]))
+  with(bat, points(time[FPT01 == 1], rep(-3,length(speed[FPT01 == 1])), col = cols[2]))
+  with(bat, points(time[HMM01 == 1], rep(-4,length(speed[HMM01 == 1])), col = cols[3]))
+  with(bat, points(time[embc01 == 1], rep(-5,length(speed[embc01 == 1])), col = cols[4]))
+  with(bat, points(time[CVCP01 == 1], rep(-6,length(speed[CVCP01 == 1])), col = cols[5]))
+  
+  with(bat, points(time[buzz > 0], speed[buzz > 0], col = 2, cex = 2, pch = 16))
+  # legend("bottomright", legend = c("Buzz", "kmC", "EMbC", "FPT", "HMM", "CVCP"), col = c(2, cols[1], cols[2], cols[3], cols[4], cols[5]), pch = c(16, rep(16, 5)), cex = 1.5)
+  mtext("E", side = 3, adj = 0, cex = 1.25)
+  
+  # speed zoom
+  # par(mai = c(.1,.1,.1,.1), oma=c(2,0,2,0), new = TRUE)
+  with(bat[200:530,], plot(time, speed, cex.lab = cex.labs, cex.axis = cex.axes, type = "n", ylim = c(-6.5, max(na.omit(speed))), xlim = c(min(time), max(time)+100), ylab = "", xlab = "", yaxt="n", col = rgb(0,0,0,.5), cex.lab=1.5)) # [160:560,]
+  # axis(2, at=0:max(na.omit(bat$speed)),labels=0:max(na.omit(bat$speed)))
+  mtext("Time (UTC-7)", side = 1, cex = 1.25, outer=FALSE, line = 3)
+  
+  with(bat, points(time, speed, cex = .75, type = "o", col = rgb(0,0,0,.5)))
+  with(bat, points(time[kmC == 1], rep(-2,length(speed[kmC == 1])), col = cols[1]))
+  with(bat, points(time[FPT01 == 1], rep(-3,length(speed[FPT01 == 1])), col = cols[2]))
+  with(bat, points(time[HMM01 == 1], rep(-4,length(speed[HMM01 == 1])), col = cols[3]))
+  with(bat, points(time[embc01 == 1], rep(-5,length(speed[embc01 == 1])), col = cols[4]))
+  with(bat, points(time[CVCP01 == 1], rep(-6,length(speed[CVCP01 == 1])), col = cols[5]))
+  
+  with(bat, points(time[buzz > 0], speed[buzz > 0], col = 2, cex = 2, pch = 16))
+  # legend("bottomright", legend = c("Buzz", "kmC", "EMbC", "FPT", "HMM", "CVCP"), col = c(2, cols[1], cols[2], cols[3], cols[4], cols[5]), pch = c(16, rep(16, 5)), cex = 1.5)
+  mtext("F", side = 3, adj = 0, cex = 1.25)
+  # with(bat[200:500], plot(time, speed, cex = .75, type = "n", ylim = c(-6.5, max(na.omit(speed))), xlim = c(min(time), max(time)+100), ylab = "Speed (m/s)", xlab = "Time (UTC-7)", yaxt="n", col = rgb(0,0,0,.5))) # [160:560,]
+  # axis(2, at=0:max(na.omit(bat$speed)),labels=0:max(na.omit(bat$speed)))
+  # 
+  # with(bat, points(time, speed, cex = .75, type = "o", col = rgb(0,0,0,.5)))
+  # with(bat, points(time[kmC == 1], rep(-2,length(speed[kmC == 1])), col = cols[1]))
+  # with(bat, points(time[embc01 == 1], rep(-3,length(speed[embc01 == 1])), col = cols[2]))
+  # with(bat, points(time[FPT01 == 1], rep(-4,length(speed[FPT01 == 1])), col = cols[3]))
+  # with(bat, points(time[HMM01 == 1], rep(-5,length(speed[HMM01 == 1])), col = cols[4]))
+  # with(bat, points(time[CVCP01 == 1], rep(-6,length(speed[CVCP01 == 1])), col = cols[5]))
+  # 
+  # with(bat, points(time[buzz > 0], speed[buzz > 0], col = 2, cex = 1, pch = 16))
+  # legend("bottomright", legend = c("Buzz", "kmC", "EMbC", "FPT", "HMM", "CVCP"), col = c(2, cols[1], cols[2], cols[3], cols[4], cols[5]), pch = c(16, rep(16, 5)))
+  # mtext("E", side = 3, adj = 0)
+dev.off()  
+
+# }
+  
+temp <- rle(bat$kmC)
+length(temp$values == 1)
+
+temp <- rle(bat$FPT01)
+length(temp$values == 1)
+
+temp <- rle(bat$HMM01)
+length(temp$values == 1)
+
+temp <- rle(bat$embc01)
+length(temp$values == 1)
+
+temp <- rle(bat$CVCP01)
+length(temp$values == 1)
+
+nrow(bat)
+```
+
+HMM3
+```{r}
+bats <- unique(Final$bat_flight)
+i=14
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 50, c = 100)[1:n]
+}
+cols = gg_color_hue(5)
+
+i = 14
+# for(i in 1:length(bats)){
+bat <- Final[Final$bat_flight == bats[i],]
+
+with(bat, plot(X, Y, cex =.75, type = "o", col = HMM3, asp = 1, xaxt='n', yaxt='n', ylab = "", xlab = "", ylim = c(min(Y), max(Y)+1000))) #, ann = FALSE, axes = FALSE))
+  with(bat, segments(x0 = min(X)- 3100, y0 = min(Y) + 100, x1 = min(X) + 900, y1 = min(Y) + 100))
+  with(bat, text(labels = "4 km", x = min(X)-900, y= min(Y)+600, cex = 1.5))
+  
+  with(bat, points(X[buzz > 0], Y[buzz > 0], col = 2, cex = 2, pch = 1))
+  with(bat, points(origin[1], origin[2], pch = 15, cex = 3))
+  legend("topleft", legend = c("Buzz", "Roost"), col = c(2, 1), pch = c(16, 15), cex = 1.5)
+  
+  lines(Islands, col = "darkgray")
+  addnortharrow(pos = "bottomright", scale = 1)
+
+```
+
+
+# Table S8: Comparison of foraging and buzzes of all methods
+```{r}
+
+bats <- unique(Final$bat_flight)
+
+seg_fb <- data.frame(bats, kmc_f = NA, kmc_b = NA, fpt_f = NA, fpt_b = NA, hmm_f = NA, hmm_b = NA, embc_f = NA, embc_b = NA, cvcp_f = NA, cvcp_b = NA)
+
+i = 1
+for(i in 1:length(bats)){
+
+  bat <- Final[Final$bat_flight == bats[i],]
+  
+  # kmC
+  seg_fb$kmc_f[i] <- paste0(length(which(bat$kmC == 1)), 
+                              "/",length(which(!is.na(bat$kmC))))
+  
+  seg_fb$kmc_b[i] <- paste0(sum(bat$buzz[which(bat$kmC == 1 & bat$buzz01 == 1)]), 
+                              "/",length(which(!is.na(bat$kmC) & bat$buzz01 == 1)))
+  
+  # FPT
+  seg_fb$fpt_f[i] <- paste0(length(which(bat$FPT01 == 1)), 
+                              "/",length(which(!is.na(bat$FPT01))))
+  
+  seg_fb$fpt_b[i] <- paste0(sum(bat$buzz[which(bat$FPT01 == 1 & bat$buzz01 == 1)]), 
+                              "/",length(which(!is.na(bat$FPT01) & bat$buzz01 == 1)))
+  
+  # HMM
+  seg_fb$hmm_f[i] <- paste0(length(which(bat$HMM01 == 1)), 
+                              "/",length(which(!is.na(bat$HMM01))))
+  
+  seg_fb$hmm_b[i] <- paste0(sum(bat$buzz[which(bat$HMM01 == 1 & bat$buzz01 == 1)]), 
+                              "/",length(which(!is.na(bat$HMM01) & bat$buzz01 == 1)))
+  
+  # EMbC
+  seg_fb$embc_f[i] <- paste0(length(which(bat$embc01 == 1)), 
+                              "/",length(which(!is.na(bat$embc01))))
+  
+  seg_fb$embc_b[i] <- paste0(sum(bat$buzz[which(bat$embc01 == 1 & bat$buzz01 == 1)]), 
+                              "/",length(which(!is.na(bat$embc01) & bat$buzz01 == 1)))
+  
+  # CVCP
+  seg_fb$cvcp_f[i] <- paste0(length(which(bat$CVCP01 == 1)), 
+                              "/",length(which(!is.na(bat$CVCP01))))
+  
+  seg_fb$cvcp_b[i] <- paste0(sum(bat$buzz[which(bat$CVCP01 == 1 & bat$buzz01 == 1)]), 
+                              "/",length(which(!is.na(bat$CVCP01) & bat$buzz01 == 1)))
+  
+}
+
+View(seg_fb[c(11:15, 1:10),])
+
+```
+
+
+
+
+# Kendall's tau correlation between search chain length and number of buzzes contained within each chain
+```{r}
+cor.test(embc_Chain$length[embc_Chain$value == 1], embc_Chain$buzz[embc_Chain$value == 1], method = "kendall")
+plot(embc_Chain$length[embc_Chain$value == 1], embc_Chain$buzz[embc_Chain$value == 1], type = "o", col = rgb(0,0,0,.1))
+
+cor.test(FPT_Chain$length[FPT_Chain$value == 1], FPT_Chain$buzz[FPT_Chain$value == 1], method = "kendall")
+
+cor.test(HMM_Chain$length[HMM_Chain$value == 1], HMM_Chain$buzz[HMM_Chain$value == 1], method = "kendall")
+cor.test(CVCP_Chain$length[CVCP_Chain$value == 1], CVCP_Chain$buzz[CVCP_Chain$value == 1], method = "kendall")
+```
+
+
+
+```{r}
+cor.test(Final$embc01, Final$buzz, method = "kendall")
+cor.test(Final$FPT01, Final$buzz, method = "kendall")
+cor.test(Final$HMM01, Final$buzz, method = "kendall")
+cor.test(Final$CVCP01, Final$buzz, method = "kendall")
+```
+
+
+# histogram of segment lengths with buzzes in them
+```{r}
+
+segs <- rle(Final$HMM01)
+idx_seg <- 1
+seg_buzz <- rep(NA, length(segs$lengths))
+i = 1
+for(i in 1:length(segs$lengths)){
+  print(idx_seg)
+  try(if(segs$values[i] == 1){
+   seg_buzz[i] <- sum(Final$buzz[idx_seg:(idx_seg + segs$lengths[i])], na.rm = TRUE)
+  })
+  idx_seg <- idx_seg + segs$lengths[i]
+}
+
+hist(segs$lengths[which(seg_buzz > 0)], breaks = 30)
+
+
+
+```
+
+# where are Final and Viv2015_audio different?
+```{r}
+sum(Final$buzz)
+table(Final$buzz)
+
+sum(Viv2015_audio$buzz)
+table(Viv2015_audio$buzz)
+
+fbats <- unique(Final$bat_flight)
+vbats <- unique(Viv2015_audio$Individual)
+```
+
