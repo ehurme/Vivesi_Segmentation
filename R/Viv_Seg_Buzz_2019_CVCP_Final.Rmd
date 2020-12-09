@@ -9,16 +9,16 @@ editor_options:
 
 # load libraries and data
 ```{r}
-libs <- c("momentuHMM", "lubridate", "data.table", "zoo", "move", "dplyr", "adehabitatLT", "smoove", "doParallel", "foreach", "maptools", "sp", "caret", "robustbase", "here", "plyr", "gbm", "MASS", "mixtools", "knitr","mapdata", "ggplot2", "scales", "gplots", "ggsignif", "ggpubr", "ggsci")
+libs <- c("momentuHMM", "lubridate", "data.table", "zoo", "move", "dplyr", "adehabitatLT", "smoove", "doParallel", "foreach", "maptools", "sp", "caret", "robustbase", "here", "plyr", "gbm", "MASS", "mixtools", "knitr","mapdata", "ggplot2", "scales", "gplots", "ggsignif", "ggpubr", "ggsci", "sf", "raster", "EMbC", "prettymapr")
 lapply(libs, suppressPackageStartupMessages(require), character.only = TRUE)
 
-source("functions.r")
-source("pairsPlus.r")
-source("gbmplot2.r")
+source("../src/functions.r")
+source("../src/pairsPlus.r")
+source("../src/gbmplot2.r")
 
-load("/Users/edwar/Dropbox/Vivesi2017/Analysis/Segmentation/Viv_Segmentation/lands.robj")
+load("../data/lands.robj")
 
-Viv2015_audio <- read.csv("C:/Users/edwar/Dropbox/Vivesi2015/vivesi_tracks/Movebank/Audio/viv2015audio_tracks.csv")
+Viv2015_audio <- read.csv("../data/viv2015audio_tracks.csv")
 Viv2015_audio <- Viv2015_audio[2:nrow(Viv2015_audio),]
 
 # scantrack(Viv2015_audio)
@@ -33,10 +33,6 @@ table(Viv2015_audio$buzz)
 # clean data and get basic movement parameters
 ## remove points from within 100m of the origin of each track  
 ```{r}
-library(sp)
-library(raster)
-library(sf)
-
 r <- raster(ncols=1000, nrows=1000, ext = extent(Islands))
 
 extent(Islands)
@@ -133,7 +129,7 @@ v <- VA
 
 unique(v$bat_flight)
 ```
-
+# inspect flights and sampling intervals
 ```{r}
 bat_flights <- unique(v$bat_flight)
 
@@ -235,7 +231,7 @@ Vint$buzz01[Vint$buzz > 0] <- 1
 Vint$bat_flight %>% unique
 names(vint) %in% v_names %>% which
 
-save(Vint, file = "Vint.robj")
+save(Vint, file = "../data/Vint.robj")
 ```
 
 
@@ -301,7 +297,7 @@ Islands
 
 ```
 
-# plot tracks
+# plot tracks with buzz locations
 ```{r}
 plot(Viv2015_audio$lon, Viv2015_audio$lat, type = "l", asp = 1, ylab = "Longitude", xlab = "Latitude")
 lines(islands, col = "darkgrey")
@@ -439,46 +435,47 @@ for(i in 1:nrow(Vint)){
 ```
 
 ## Optimize FPT threshold by BACC
+### Not included in final analysis because we were trying to see what uninformed segmentation would provide
 ```{r}
-exp(threshold)
-threshs <- seq(50, 300, by = 5)
-thresh_FPT_BACC_bat <- {}
-
-for(i in 1:length(threshs)){
-  
-  bats <- unique(Vint$bat_flight)
-  
-  BACC <- data.frame(bats, bacc = NA, thresh = threshs[i])
-  
-  for(j in 1:length(bats)){
-    
-    bat <- Vint[Vint$bat_flight == bats[j],]
-    bat <- bat[!is.na(bat$FPT01) | !is.na(bat$buzz01),]
-    
-    buzz <- factor(bat$buzz01, levels = c("1", "0")) 
-    FPT <- rep(0, nrow(bat))
-    FPT[bat$FPT > threshs[i]] <- 1
-    FPT <- factor(FPT, levels = c("1", "0"))
-    FPT_mat <- confusionMatrix(table(FPT, buzz))
-    BACC$bacc[j] <- FPT_mat$byClass[11]
-  }
-  thresh_FPT_BACC_bat <- rbind(thresh_FPT_BACC_bat, BACC)
-}
-
-thresh_FPT_BACC_bat$cols <- 1
-thresh_FPT_BACC_bat$cols[thresh_FPT_BACC_bat$thresh == 120] <- 2 # what are these numbers? 
-thresh_FPT_BACC_bat$cols[thresh_FPT_BACC_bat$thresh == 155] <- 3 
-
-# png(file = "/Users/edwar/Dropbox/Vivesi2018/Documents/Segmentation/MovementEcology/Revisions/BACC_FPT_thresholds.png", width = 600, height = 400)
-ggplot(thresh_FPT_BACC_bat)+ 
-  geom_boxplot(aes(y = bacc, x = factor(thresh), col = factor(cols)))+ guides(col = FALSE)+
-  xlab("FPT Threshold (secs)")+
-  ylab("Balanced Accuracy")+ylim(c(0,1))+theme_classic() + 
-  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
-  geom_abline(slope = 0, intercept = 0.5) # +
-  # geom_vline(xintercept = 15) +
-  # geom_vline(xintercept = 21, col = 2) 
-# dev.off() 
+# exp(threshold)
+# threshs <- seq(50, 300, by = 5)
+# thresh_FPT_BACC_bat <- {}
+# 
+# for(i in 1:length(threshs)){
+#   
+#   bats <- unique(Vint$bat_flight)
+#   
+#   BACC <- data.frame(bats, bacc = NA, thresh = threshs[i])
+#   
+#   for(j in 1:length(bats)){
+#     
+#     bat <- Vint[Vint$bat_flight == bats[j],]
+#     bat <- bat[!is.na(bat$FPT01) | !is.na(bat$buzz01),]
+#     
+#     buzz <- factor(bat$buzz01, levels = c("1", "0")) 
+#     FPT <- rep(0, nrow(bat))
+#     FPT[bat$FPT > threshs[i]] <- 1
+#     FPT <- factor(FPT, levels = c("1", "0"))
+#     FPT_mat <- confusionMatrix(table(FPT, buzz))
+#     BACC$bacc[j] <- FPT_mat$byClass[11]
+#   }
+#   thresh_FPT_BACC_bat <- rbind(thresh_FPT_BACC_bat, BACC)
+# }
+# 
+# thresh_FPT_BACC_bat$cols <- 1
+# thresh_FPT_BACC_bat$cols[thresh_FPT_BACC_bat$thresh == 120] <- 2 # what are these numbers? 
+# thresh_FPT_BACC_bat$cols[thresh_FPT_BACC_bat$thresh == 155] <- 3 
+# 
+# # png(file = "../plots/BACC_FPT_thresholds.png", width = 600, height = 400)
+# ggplot(thresh_FPT_BACC_bat)+ 
+#   geom_boxplot(aes(y = bacc, x = factor(thresh), col = factor(cols)))+ guides(col = FALSE)+
+#   xlab("FPT Threshold (secs)")+
+#   ylab("Balanced Accuracy")+ylim(c(0,1))+theme_classic() + 
+#   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+#   geom_abline(slope = 0, intercept = 0.5) # +
+#   # geom_vline(xintercept = 15) +
+#   # geom_vline(xintercept = 21, col = 2) 
+# # dev.off() 
 
 ```
 
@@ -497,7 +494,7 @@ ggmix <- ggplot(mixmdl_df, aes(x = x)) +
   stat_function(fun = dnorm, args = list(mean = mixmdl$mu[2], sd = mixmdl$sigma[2]), col = 2)+
   theme_classic() + geom_vline(xintercept = threshold, cex = 1, linetype = 2) + xlab("ln(FPT)")
 
-png(filename = "Seg_Viv_FPT.png", width = 800, height = 600)
+png(filename = "../plots/Seg_Viv_FPT.png", width = 800, height = 600)
 ggpubr::ggarrange(p+theme(text = element_text(size=15)), ggmix+theme(text = element_text(size=15)), labels = c("A", "B"), ncol = 2, nrow = 1)
 dev.off()
 ```
@@ -533,7 +530,7 @@ anglePar0 <- c(kappa0)
 m2_15 <- {}
 try(m2_15 <- fitHMM(data=HMM_data_15,nbStates=nbStates,dist=list(step=stepDist,angle=angleDist),
                     Par0=list(step=stepPar0,angle=anglePar0)))
-
+?fitHMM
 if(length(m2_15) == 0){
   stepPar0 <- c(mu0,sigma0)
   try(m2_15 <- fitHMM(data=HMM_data_15,nbStates=nbStates,dist=list(step=stepDist,angle=angleDist),
@@ -541,9 +538,10 @@ if(length(m2_15) == 0){
 }
 try(plot(m2_15, ask = FALSE, breaks = 20, plotTracks = FALSE))
 
-pr <- pseudoRes(m2_15)
+cores <- detectCores()
+pr <- pseudoRes(m2_15, ncores = cores)
 acf(pr$stepRes[!is.na(pr$stepRes)], lag.max = 300)
-png(filename = "HMM2_pr.png", width = 800, height = 600)
+png(filename = "../plots/HMM2_pr.png", width = 800, height = 600)
 plotPR(m2_15)
 dev.off()
 jarque_bera(m2_15)
@@ -595,7 +593,8 @@ if(length(m3_15) == 0){
 }
 try(plot(m3_15, ask = FALSE, breaks = 20, plotTracks = TRUE))
 
-pr <- pseudoRes(m3_15)
+cores <- detectCores()
+pr <- pseudoRes(m3_15, ncores = cores)
 acf(pr$stepRes[!is.na(pr$stepRes)], lag.max = 300)
 plotPR(m3_15)
 
@@ -656,7 +655,8 @@ if(length(m4_15) == 0){
 }
 try(plot(m4_15, ask = FALSE, breaks = 20, plotTracks = TRUE))
 
-pr <- pseudoRes(m4_15)
+cores <- detectCores()
+pr <- pseudoRes(m4_15, ncores = cores)
 acf(pr$stepRes[!is.na(pr$stepRes)], lag.max = 300)
 plotPR(m4_15)
 
@@ -720,8 +720,8 @@ plot(BACC_HMM[,2:3])
 plot(BACC_HMM[,2] - BACC_HMM[,3])
 mean(BACC_HMM[,2] - BACC_HMM[,3])
 
-png(filename = "HMM2_vs_3.png", width = 800, height = 600)
-boxplot(BACC_HMM$HMM2, BACC_HMM$HMM3, names = c("HMM2", "HMM3"))
+png(filename = "../plots/HMM2_vs_3.png", width = 800, height = 600)
+boxplot(BACC_HMM$HMM2, BACC_HMM$HMM3, names = c("HMM2", "HMM3"), ylab = "Balanced Accuracy")
 dev.off()
 
 Vint$HMM <- Vint$HMM2
@@ -733,17 +733,24 @@ Vint$HMM01 <- Vint$HMM201
 bats <- unique(Vint$bat_flight)
 bat <- Vint[Vint$bat_flight == bats[15],]
 ### add
-layout(rbind(c(1,2), c(1,2)))
+layout(rbind(c(1,2,3), c(1,2,3)))
 # sputm <- SpatialPoints(cbind(bat$x, bat$y), proj4string=CRS("+proj=utm +zone=12 +datum=WGS84"))  
 # spgeo <- spTransform(sputm, CRS("+proj=yglat +datum=WGS84"))
 # bat$lat <- spgeo@coords[,1]
 # bat$y <- spgeo@coords[,2]
 with(bat, plot(x,y,asp = 1,type = "l", xlab = "Latitude", ylab = "Longitude"))
-with(bat[bat$HMM201 == 1,], points(x, y, col = "orange"))
-#with(bat[bat$buzz01 == 1,], points(x,y, col = 2, pch = 8))
+with(bat[bat$buzz01 == 1,], points(x,y, col = 2, pch = 8))
 lines(Coast)
 lines(Islands)
-legend("topright", legend = c("Buzz", "HMM2"), pch = c(8,1), col = c(2, "orange"))
+legend("topright", legend = "Buzz", pch = 8, col = 2)
+
+
+with(bat, plot(x,y,asp = 1,type = "l", xlab = "Latitude", ylab = "Longitude"))
+with(bat[bat$HMM201 == 1,], points(x, y, col = "orange"))
+# with(bat[bat$buzz01 == 1,], points(x,y, col = 2, pch = 8))
+lines(Coast)
+lines(Islands)
+legend("topright", legend = c("HMM2"), pch = c(1), col = c("orange"))
 
 # sputm <- SpatialPoints(cbind(bat$x, bat$y), proj4string=CRS("+proj=utm +zone=12 +datum=WGS84"))  
 # spgeo <- spTransform(sputm, CRS("+proj=ygx +datum=WGS84"))
@@ -754,13 +761,14 @@ with(bat[bat$HMM301 == 1,], points(x, y, col = "orange"))
 # with(bat[bat$buzz01 == 1,], points(x,y, col = 2, pch = 8))
 lines(Coast)
 lines(Islands)
-legend("topright", legend = c("Buzz", "HMM3"), pch = c(8,1), col = c(2, "orange"))
+legend("topright", legend = c("HMM3"), pch = c(1), col = c("orange"))
 
 ```
 
 # CVCP analysis
 ```{r}
-cl <- makeCluster(2)
+cores <- detectCores()
+cl <- makeCluster(cores)
 registerDoParallel(cl)
 
 V$Z <- V$x + 1i*V$y
@@ -769,7 +777,7 @@ bats <- unique(V$bat_flight)
 phaseTables <- {}
 Bats <- {}
 
-#pdf(file = "Smoove_Vivesi_20180321_UCVCP_noCW_AIC.pdf")
+pdf(file = "../plots/Smoove_Vivesi_20180321_UCVCP_noCW_AIC.pdf")
 i = 8
 j = 1
 for(i in 1:length(bats)){
@@ -863,14 +871,14 @@ for(i in 1:length(bats)){
   }
 }
 
-# dev.off()
+dev.off()
 
-save(Bats, phaseTables, batPhases, Bat, T, batSweep, Z.cols, cols, batCP.table, Vint, V, v, vint, m2_15,  file = paste0("CVCP_Vivesi_DT_", DT, ".robj"))
+save(Bats, phaseTables, batPhases, Bat, T, batSweep, Z.cols, cols, batCP.table, Vint, V, v, vint, m2_15,  file = paste0("../data/CVCP_Vivesi_DT_", DT, ".robj"))
 ```
 
 ```{r}
 DT = 15
-load(paste0("CVCP_Vivesi_DT_", DT, ".robj"))
+load(paste0("../data/CVCP_Vivesi_DT_", DT, ".robj"))
 
 ### CVCP plot
 layout(rbind(c(1,2), c(1,3), c(1,4)))
@@ -1087,7 +1095,7 @@ plot(BACC_embc[,2:3])
 plot(BACC_embc[,2] - BACC_embc[,3])
 mean(BACC_embc[,2] - BACC_embc[,3])
 
-png(filename = "EMbC_BACC.png", width = 800, height = 600)
+png(filename = "../plots/EMbC_BACC.png", width = 800, height = 600)
 boxplot(BACC_embc$embc1, BACC_embc$embc2, BACC_embc$embc3, BACC_embc$embc4, BACC_embc$embc24, 
         ylab = "Balanced Accuracy", names = c("LL", "LH", "HL", "HH", "LH-HH"))
 abline(h = 0.5, lty = 2)
@@ -1099,6 +1107,7 @@ dev.off()
 
 
 # k-means
+## might need to rerun if foraging and commuting get flipped...
 ```{r}
 k.max <- 5
 data <- as.matrix(na.omit(data.frame(index = 1:nrow(Final), speed = Final$speed, turn = abs(Final$rel.angle)*180/pi)))
@@ -1131,7 +1140,7 @@ if(idx == 2){
 
 with(Final, plot(x,y, col = kmC+1, asp = 1))
 
-png(filename = "/Users/edwar/Dropbox/Vivesi2018/Documents/Segmentation/MovementEcology/Revisions/VSeg_FigS2.png", width = 800, height = 600)
+png(filename = "../plots/VSeg_FigS2.png", width = 800, height = 600)
 ggplot(Final, aes(speed, abs(rel.angle) * 180/pi, col = kmC)) + 
   geom_bin2d() + geom_abline(intercept = 75, slope = 0, lwd = 1, lty = 2, col = "orange") + ylab(expression(paste("abs(turn angle) ( ",degree,")"))) + xlab("speed (m/s)") + theme(text = element_text(size = 20))
 dev.off()
@@ -1274,7 +1283,7 @@ for(i in 1:length(bats)){
 
 }
 
-TNR_buzz_mlt <- melt(TNR_buzz)
+TNR_buzz_mlt <- reshape2::melt(TNR_buzz)
 
 ```
 
@@ -1310,19 +1319,14 @@ i = 15
 # percent buzz in foraging?
 ```{r}
 table(Final$buzz, Final$kmC)
-(230+21*2)/sum(Final$buzz) # 42.0 %
 
 table(Final$buzz, Final$embc01)
-(282+26*2)/sum(Final$buzz) # 51.5%
 
 table(Final$buzz, Final$FPT01)
-(379+30*2)/sum(Final$buzz) # 67.7%
 
 table(Final$buzz, Final$HMM01)
-(411+32*2)/sum(Final$buzz) # 73.3%
 
 table(Final$buzz, Final$CVCP01)
-(374+29*2)/sum(Final$buzz) # 66.7%
 
 ```
 
@@ -1506,10 +1510,8 @@ friedman.test(value ~ variable | bat, data = BACC_buzz_mlt)
 ### Figure 4
 #### prep TNR TPR data
 ```{r}
-
-
-TPR_buzz_mlt <- melt(TPR_buzz)
-TNR_buzz_mlt <- melt(TNR_buzz)
+TPR_buzz_mlt <- reshape2::melt(TPR_buzz)
+TNR_buzz_mlt <- reshape2::melt(TNR_buzz)
 
 TPR_TNR <- TPR_buzz_mlt
 TPR_TNR$value2 <- TNR_buzz_mlt$value
@@ -1524,6 +1526,7 @@ TPR_TNR_sum <- TPR_TNR_sum[,c(2:7,9:12)]
 TPR_TNR_sum$var <- c("kmC", "FPT", "HMM", "EMbC", "CVCP")
 TPR_TNR_sum$var <- factor(TPR_TNR_sum$var, levels = c("kmC", "FPT", "HMM", "EMbC", "CVCP"))
 ```
+
 #### plot TPR TNR
 ```{r}
 TPR_TNR_plot <- 
@@ -1542,7 +1545,7 @@ TPR_TNR_plot
 
 #### prep BACC
 ```{r}
-BACC_buzz_mlt <- melt(BACC_buzz[,1:6], by = bat)
+BACC_buzz_mlt <- reshape2::melt(BACC_buzz[,1:6], by = bat)
 BACC_buzz_mlt <- BACC_buzz_mlt[!is.na(BACC_buzz_mlt$variable),]
 BACC_buzz_mlt$variable <- factor(BACC_buzz_mlt$variable, levels = c("kmC", "FPT", "HMM", "EMbC", "CVCP"))
 
@@ -1586,7 +1589,7 @@ BACC_boxplot_letters
 
 ```{r}
 
-png(filename = "/Users/edwar/Dropbox/Vivesi2018/Documents/Segmentation/MovementEcology/Revisions/VSeg_Fig4_boxplot_letters.png", width = 800, height = 600)
+png(filename = "../plots/VSeg_Fig4_boxplot_letters.png", width = 800, height = 600)
 sizes <- 22
 ggpubr::ggarrange(TPR_TNR_plot+theme(text = element_text(size=sizes)), BACC_boxplot_letters+theme(text = element_text(size=sizes))+theme(axis.text.x = element_text(angle = 30, hjust = 1, size = sizes)), ncol = 2, nrow = 1, labels = c("A", "B"), align = "h")
 
@@ -1862,9 +1865,6 @@ Final$embc %>% is.na %>% as.numeric %>% sum
 Final$CVCP %>% is.na %>% as.numeric %>% sum
 
 ```
-
-
-
 
 # Chains of movement  
 ## FPT
@@ -2210,7 +2210,7 @@ n_chains$CVCP %>% mean
 
 # Fig3 Boxplot
 ```{r}
-png(filename = "/Users/edwar/Dropbox/Vivesi2018/Documents/Segmentation/MovementEcology/Revisions/VSeg_Fig3_boxplot_letters.png", height = 600, width = 800)
+png(filename = "../plots/VSeg_Fig3_boxplot_letters.png", height = 600, width = 800)
 ggpubr::ggarrange(search_boxplot_letters+
                     theme(text = element_text(size=sizes))+
                     ylab("% Foraging"),
@@ -2394,7 +2394,7 @@ hist(buzz_interval$lengths[buzz_interval$values == 0], breaks = 100, main = "", 
 
 length(which(buzz_interval$lengths < 2*4 & buzz_interval$values == 0))/length(which(buzz_interval$values == 0))
 
-png(filename = "Time_to_next_buzz.png", width = 800, height = 600)
+png(filename = "../plots/Time_to_next_buzz.png", width = 800, height = 600)
 a <- hist(log(buzz_interval$lengths[buzz_interval$values == 0]/4), breaks = 50, main = "", xlab = "Minutes to next buzz", xaxt = "n", freq = TRUE) 
 axis <- c(.08,.25,.5,1,2,5,10,20, 40, 100)
 axis(1, at = log(axis), labels = axis)
@@ -2448,9 +2448,7 @@ prop.table(table(seg_interval$lengths[seg_interval$values == 0]/4 < 5))
 
 # save data
 ```{r}
-save(Final, Bats, Viv2015_audio, V, Vint, va.traj, m2_15, m3_15, threshold, HMM_data, hmm_mat, TNR_buzz, BA_buzz, TNR_buzz, TNR_buzz_mlt, TPR_buzz, TPR_buzz_mlt, BACC_buzz, BACC_buzz_mlt, TPR_TNR_plot, BACC_plot, sum_BACC, sum_search, fspeed, fturn, cspeed, cturn, file = "VSeg_Buzz_18.robj")
-
-# 'ACC', 'chain_length', 'chain_length_mlt', 'chain_TPR', 'chain_TPR_mlt', 'n_chains', 'n_chains_mlt'
+save(Final, Bats, Viv2015_audio, V, Vint, va.traj, m2_15, m3_15, threshold, HMM_data, TNR_buzz, TNR_buzz, TNR_buzz_mlt, TPR_buzz, TPR_buzz_mlt, BACC_buzz, BACC_buzz_mlt, TPR_TNR_plot, sum_BACC, fspeed, fturn, cspeed, cturn, file = "../data/VSeg_Buzz_18.robj")
 
 load("VSeg_Buzz_18.robj")
 ```
@@ -2527,7 +2525,7 @@ boxplot(rate~bat_flight, data = buzz_rate, las = 2)
 
 buzz_rate
 
-write.csv(buzz_rate, file = "buzz_rate.csv")
+write.csv(buzz_rate, file = "../data/buzz_rate.csv")
 
 library(dplyr)
 
@@ -2548,15 +2546,13 @@ buzz_rate_sum$rate %>% var(na.rm = TRUE)/sqrt(nrow(buzz_rate_sum))
 
 # Fig 5: Plot tracks with labels
 ```{r}
-library(prettymapr)
-# Viv2015_audio <- read.csv("C:/Users/edwar/Dropbox/Vivesi2015/vivesi_tracks/Movebank/Audio/viv2015audio_tracks.csv")
+# Viv2015_audio <- read.csv("../data/viv2015audio_tracks.csv")
 
 origin <- c(Viv2015_audio$x[1], Viv2015_audio$y[1])
 
-# setwd("/Users/edwar/Dropbox/Vivesi2018/Documents/Segmentation/MovementEcology/Revisions/")
 ## width: 800, height: 862
 
-png(filename = "/Users/edwar/Dropbox/Vivesi2018/Documents/Segmentation/MovementEcology/Revisions/VSeg_Fig5_v6.png", width = 800, height = 900)
+png(filename = "../plots/VSeg_Fig5_v6.png", width = 800, height = 900)
 
 bats <- unique(Final$bat_flight)
 i=14
@@ -2736,7 +2732,6 @@ with(bat, plot(X, Y, cex =.75, type = "o", col = HMM3, asp = 1, xaxt='n', yaxt='
 
 ```
 
-
 # Table S8: Comparison of foraging and buzzes of all methods
 ```{r}
 
@@ -2790,33 +2785,8 @@ View(seg_fb[c(11:15, 1:10),])
 
 ```
 
-
-
-
-# Kendall's tau correlation between search chain length and number of buzzes contained within each chain
-```{r}
-cor.test(embc_Chain$length[embc_Chain$value == 1], embc_Chain$buzz[embc_Chain$value == 1], method = "kendall")
-plot(embc_Chain$length[embc_Chain$value == 1], embc_Chain$buzz[embc_Chain$value == 1], type = "o", col = rgb(0,0,0,.1))
-
-cor.test(FPT_Chain$length[FPT_Chain$value == 1], FPT_Chain$buzz[FPT_Chain$value == 1], method = "kendall")
-
-cor.test(HMM_Chain$length[HMM_Chain$value == 1], HMM_Chain$buzz[HMM_Chain$value == 1], method = "kendall")
-cor.test(CVCP_Chain$length[CVCP_Chain$value == 1], CVCP_Chain$buzz[CVCP_Chain$value == 1], method = "kendall")
-```
-
-
-
-```{r}
-cor.test(Final$embc01, Final$buzz, method = "kendall")
-cor.test(Final$FPT01, Final$buzz, method = "kendall")
-cor.test(Final$HMM01, Final$buzz, method = "kendall")
-cor.test(Final$CVCP01, Final$buzz, method = "kendall")
-```
-
-
 # histogram of segment lengths with buzzes in them
 ```{r}
-
 segs <- rle(Final$HMM01)
 idx_seg <- 1
 seg_buzz <- rep(NA, length(segs$lengths))
@@ -2831,19 +2801,5 @@ for(i in 1:length(segs$lengths)){
 
 hist(segs$lengths[which(seg_buzz > 0)], breaks = 30)
 
-
-
-```
-
-# where are Final and Viv2015_audio different?
-```{r}
-sum(Final$buzz)
-table(Final$buzz)
-
-sum(Viv2015_audio$buzz)
-table(Viv2015_audio$buzz)
-
-fbats <- unique(Final$bat_flight)
-vbats <- unique(Viv2015_audio$Individual)
 ```
 
