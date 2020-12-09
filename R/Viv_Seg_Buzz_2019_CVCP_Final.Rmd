@@ -9,24 +9,12 @@ editor_options:
 
 # load libraries and data
 ```{r}
-setwd("/Users/edwar/Dropbox/Vivesi2017/Analysis/Segmentation/Viv_Segmentation/")
 libs <- c("momentuHMM", "lubridate", "data.table", "zoo", "move", "dplyr", "adehabitatLT", "smoove", "doParallel", "foreach", "maptools", "sp", "caret", "robustbase", "here", "plyr", "gbm", "MASS", "mixtools", "knitr","mapdata", "ggplot2", "scales", "gplots", "ggsignif", "ggpubr", "ggsci")
 lapply(libs, suppressPackageStartupMessages(require), character.only = TRUE)
 
 source("functions.r")
 source("pairsPlus.r")
 source("gbmplot2.r")
-
-scantrack <- function(track, ...){
-  layout(rbind(c(1,2), c(1,3)))
-  with(track, plot(x,y,type = "o", main = Individual[1], col = date(time)))
-  lines(Islands)
-  lines(Coast)
-  with(track, plot(time,x))
-  with(track, plot(time,y))
-  layout(1)
-}
-
 
 load("/Users/edwar/Dropbox/Vivesi2017/Analysis/Segmentation/Viv_Segmentation/lands.robj")
 
